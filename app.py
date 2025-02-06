@@ -90,11 +90,15 @@ app_logger.info(f"SECRET_KEY set for Flask sessions: {app.config['SECRET_KEY']}"
 jwt = JWTManager(app)
 app_logger.info("Created JWTManager")
 
-# Set up rate limiting
+# Initialize Redis client
+redis_client = get_redis_client()
+
+# Set up rate limiting using Redis as storage
 limiter = Limiter(
     get_remote_address,
     app=app,
-    default_limits=["200 per day", "50 per hour"]
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri=f"redis://:{os.getenv('REDIS_PASSWORD')}@{os.getenv('REDIS_HOST')}:{os.getenv('REDIS_PORT')}/{os.getenv('REDIS_DB', 0)}"
 )
 
 # Replace these with your PythonAnywhere username and API token

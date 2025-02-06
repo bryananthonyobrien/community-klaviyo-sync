@@ -7,6 +7,9 @@ WORKDIR /app
 # Copy the application files into the container
 COPY . .
 
+# Ensure the .env file exists before copying (prevents build failure)
+RUN if [ -f .env ]; then cp .env /app/.env; fi
+
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -15,4 +18,3 @@ EXPOSE 5000
 
 # Run the Flask app with Gunicorn (for better performance)
 CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:5000", "app:app"]
-
