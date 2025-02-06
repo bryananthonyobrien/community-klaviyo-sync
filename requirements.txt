@@ -12,5 +12,4 @@ pyjwt
 redis
 pytz
 python-dateutil
-sqlite3
 
