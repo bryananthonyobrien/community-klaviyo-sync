@@ -190,14 +190,13 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-@measure_time
 @app.route('/')
 def index():
-    # Redirect to www.bryanworx.com if accessed without www
-    if request.host == 'bryanworx.com':
+    # Only redirect to www.bryanworx.com if not on localhost
+    if request.host == 'bryanworx.com' and not request.host.startswith('localhost') and not request.host.startswith('127.0.0.1'):
         return redirect('https://www.bryanworx.com', code=301)
     return render_template('login.html')
-
+    
 @app.route('/success', methods=['GET'])
 @cross_origin()
 def payment_success():
