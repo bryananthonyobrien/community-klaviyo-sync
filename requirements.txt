@@ -12,4 +12,6 @@ pyjwt
 redis
 pytz
 python-dateutil
+flask-caching
+
 
