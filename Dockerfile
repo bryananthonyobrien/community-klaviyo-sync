@@ -10,7 +10,10 @@ COPY . .
 # Ensure the .env file exists before copying (prevents build failure)
 RUN if [ -f .env ]; then cp .env /app/.env; fi
 
-# Install dependencies
+# Install curl (and other necessary system dependencies)
+RUN apt-get update && apt-get install -y curl
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Expose port 5000 for Flask
