@@ -11,6 +11,6 @@ tenacity
 pyjwt
 redis
 pytz
-dateutil
+python-dateutil
 sqlite3
 
