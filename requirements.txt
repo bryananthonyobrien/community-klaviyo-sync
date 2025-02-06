@@ -1,0 +1,16 @@
+Flask
+gunicorn
+python-dotenv
+flask-jwt-extended
+flask-cors
+flask-limiter
+flask-sslify
+requests
+urllib3
+tenacity
+pyjwt
+redis
+pytz
+dateutil
+sqlite3
+
