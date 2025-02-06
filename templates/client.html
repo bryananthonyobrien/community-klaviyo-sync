@@ -1,0 +1,1495 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Client Dashboard</title>
+    <style>
+
+.sorted-column-arrow {
+    font-size: 12px;
+    color: red;
+    margin-left: 5px;
+}
+
+#sort-filter-ui {
+    display: none; /* Initially hidden */
+    position: absolute;
+    z-index: 1000;
+    background: white;
+    border: 1px solid #ccc;
+    padding: 10px;
+    box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1);
+    width: 250px;
+    transition: all 0.3s ease; /* Optional for smooth display */
+}
+
+
+.sort-filter-panel {
+  border: 1px solid #ccc;
+  padding: 10px;
+  background: #f9f9f9;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  width: 250px;
+  z-index: 1000;
+}
+
+.table-row.highlight {
+    background-color: #81d4fa; /* Light blue highlight */
+    color: black; /* Adjust text color for contrast */
+}
+
+      #selected-member-events-container .table-spinner {
+        display: none;
+        justify-content: center;
+        align-items: center;
+        height: 100px;
+      }
+
+      #selected-member-message-events-container .table-spinner {
+        display: none;
+        justify-content: center;
+        align-items: center;
+        height: 100px;
+      }
+
+      #selected-member-events-table th,
+      #selected-member-events-table td {
+        padding: 8px;
+        text-align: left;
+      }
+
+      #selected-member-message-events-table th,
+      #selected-member-message-events-table td {
+        padding: 8px;
+        text-align: left;
+      }
+
+      .button_spinner {
+        border: 2px solid #f3f3f3;
+        /* Light grey */
+        border-top: 2px solid #3498db;
+        /* Blue */
+        border-radius: 50%;
+        width: 10px;
+        /* Spinner size */
+        height: 10px;
+        animation: button_spin 1s linear infinite;
+        display: inline-block;
+        margin-left: 5px;
+        vertical-align: middle;
+      }
+
+      .page-indicator {
+        margin: 10px 0;
+        font-size: 16px;
+        text-align: center;
+        font-weight: bold;
+        color: #333;
+      }
+
+      @keyframes button_spin {
+        0% {
+          transform: rotate(0deg);
+        }
+
+        100% {
+          transform: rotate(360deg);
+        }
+      }
+
+      /* Static Table Headers and Rows */
+      #passed-quality-check-table th,
+      #passed-quality-check-table td,
+      #quality-check-table th,
+      #quality-check-table td {
+        text-align: left;
+        padding: 8px;
+        border-bottom: 1px solid #ddd;
+      }
+
+      #passed-quality-check-table th,
+      #quality-check-table th {
+        background-color: white;
+        position: sticky;
+        /* Make headers sticky */
+        top: 0;
+        z-index: 1;
+      }
+
+      /* Hover and Selected Cell Styling */
+      #passed-quality-check-table tbody tr:hover,
+      #quality-check-table tbody tr:hover {
+        background-color: #e0f7fa;
+        /* Light blue for hover effect */
+      }
+
+      .selected-cell {
+        background-color: #b3d1ff;
+      }
+
+      /* Dynamic Table Styling */
+      #quality-checks-passed-view-table th,
+      #quality-checks-passed-view-table td,
+      #quality-checks-view-table th,
+      #quality-checks-view-table td {
+        text-align: left;
+        padding: 8px;
+        border-bottom: 1px solid #ddd;
+      }
+
+      #quality-checks-passed-view-table th,
+      #quality-checks-view-table th {
+        background-color: white;
+        position: sticky;
+        /* Make headers sticky */
+        top: 0;
+        z-index: 1;
+      }
+
+      #quality-checks-passed-view-table tbody tr:hover,
+      #quality-checks-view-table tbody tr:hover {
+        background-color: #e0f7fa;
+        /* Light blue for hover effect */
+      }
+
+      /* Highlight selected row */
+      #quality-checks-passed-view-table tr.selected {
+        background-color: #b3d1ff !important;
+        /* New light blue color */
+      }
+
+      #quality-checks-passed-view-table tbody tr.selected,
+      #quality-checks-view-table tbody tr.selected {
+        background-color: #81d4fa;
+        /* Blue highlight for selected row */
+      }
+
+      .pagination-container {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .page-number {
+        background-color: white;
+        border: 1px solid #ccc;
+        padding: 5px 10px;
+        cursor: pointer;
+      }
+
+      .page-number.active {
+        background-color: black;
+        color: white;
+      }
+
+      .results-info {
+        margin-left: 10px;
+        font-size: 14px;
+      }
+
+      /* Style for the Community Member View Table */
+      #community-member-view-table {
+        width: 100%;
+        border-collapse: collapse;
+        background-color: #fff;
+        /* White background for the table */
+        margin-top: 20px;
+        /* Spacing at the top */
+      }
+
+      #clashed-members-view-table tr.selected {
+        background-color: #81d4fa;
+      }
+
+      #community-member-view-table th,
+      #community-member-view-table td {
+        padding: 8px;
+        /* Padding for table cells */
+        text-align: left;
+        /* Left-align text */
+        border-bottom: 1px solid #ddd;
+        /* Border below each cell */
+      }
+
+      #community-member-view-table th {
+        background-color: #f2f2f2;
+        /* Light gray for header */
+        position: sticky;
+        /* Sticky header */
+        top: 0;
+        /* Stick header to the top */
+        z-index: 10;
+        /* Stay above other content */
+      }
+
+      #community-member-view-table tbody tr:hover {
+        background-color: #e0f7fa;
+        /* Light blue background on hover */
+      }
+
+      #community-member-view-table .selected {
+        background-color: #81d4fa;
+        /* Blue highlight for selected row */
+      }
+
+      #community-events-table th {
+        background-color: #f2f2f2;
+        /* Light gray background for header */
+        position: sticky;
+        top: 0;
+        z-index: 10;
+      }
+
+      #members-clash-table .selected {
+        background-color: #81d4fa;
+      }
+
+      #quality-check-table .selected {
+        background-color: #81d4fa;
+      }
+
+      #passed-quality-check-table .selected {
+        background-color: #81d4fa;
+      }
+
+      #community-events-table tr.selected {
+        background-color: #81d4fa;
+        /* Light blue background for selected row */
+      }
+
+      .context-menu,
+      .filter-panel {
+        background-color: white;
+        border: 1px solid #ddd;
+        box-shadow: 0px 8px 16px rgba(0, 0, 0, 0.2);
+        padding: 8px;
+        z-index: 1000;
+      }
+
+      .context-menu div,
+      .filter-panel label {
+        cursor: pointer;
+        padding: 5px;
+      }
+
+      .context-menu div:hover,
+      .filter-panel label:hover {
+        background-color: #f2f2f2;
+      }
+
+      .filter-panel {
+        position: fixed;
+        top: 20%;
+        left: 20%;
+        max-width: 300px;
+        padding: 10px;
+        overflow-y: auto;
+        max-height: 400px;
+      }
+
+      .filter-values {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .filter-panel input[type="text"] {
+        margin-bottom: 10px;
+        padding: 5px;
+        width: 100%;
+      }
+
+      #successful-imports-count-spinner {
+        display: none;
+        position: absolute;
+        z-index: 1000;
+        top: 50%;
+        /* Center vertically */
+        left: 50%;
+        /* Center horizontally */
+        transform: translate(-50%, -50%);
+        /* Align it correctly */
+      }
+
+      .checkbox-container {
+        display: flex;
+        align-items: center;
+        margin-top: 20px;
+      }
+
+      .checkbox-label {
+        margin-left: 10px;
+      }
+
+      .table-container {
+        max-height: 400px;
+        /* Set the max height for the scrollable area */
+        overflow-y: auto;
+        /* Enable vertical scrolling */
+        border: 1px solid #ddd;
+        /* Optional: Add border around the table */
+        position: relative;
+        /* Needed for absolutely positioned spinner */
+      }
+
+      #clashed-members-view-table thead th {
+        position: sticky;
+        /* Make the headers sticky */
+        top: 0;
+        /* Stick to the top of the container */
+        background-color: white;
+        /* Set a background color for visibility */
+        z-index: 1;
+        /* Ensure headers stay on top of other content */
+        border-bottom: 2px solid #ddd;
+        /* Optional: Add a border for visual distinction */
+        padding: 8px;
+        /* Adjust padding for a consistent look */
+      }
+
+      #profiles-table {
+        width: 100%;
+        border-collapse: collapse;
+        /* Ensure borders are collapsed */
+      }
+
+      #profiles-table th,
+      #profiles-table td {
+        border: 1px solid #ddd;
+        /* Add border to table cells */
+        padding: 8px;
+        /* Add padding to table cells */
+        text-align: left;
+        /* Align text to the left */
+      }
+
+      #profiles-table th {
+        background-color: #f2f2f2;
+        /* Light gray background for header */
+        position: sticky;
+        /* Make the header sticky */
+        top: 0;
+        /* Position it at the top of the container */
+        z-index: 10;
+        /* Ensure it stays above other content */
+      }
+
+      #profiles-table tr:hover {
+        background-color: #e0f7fa;
+        /* Light blue background on hover */
+      }
+
+      .selected {
+        background-color: #81d4fa;
+        /* Highlight color for selected row */
+      }
+
+      body {
+        font-family: Arial, sans-serif;
+        background-color: #f8f8f8;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        height: 100vh;
+      }
+
+      .sidebar {
+        width: 200px;
+        /* Width of the tab sidebar */
+        background-color: #fff;
+        padding: 20px;
+        box-shadow: 2px 0 5px rgba(0, 0, 0, 0.1);
+        display: flex;
+        flex-direction: column;
+      }
+
+      .tab-button {
+        background-color: #4CAF50;
+        color: white;
+        padding: 10px;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        margin-bottom: 10px;
+        transition: background-color 0.3s;
+      }
+
+      .tab-button.active {
+        background-color: #4CAF50;
+      }
+
+      .tab-button.inactive {
+        background-color: grey;
+      }
+
+      .content {
+        flex-grow: 1;
+        /* Takes up the remaining width */
+        padding: 20px;
+        overflow-y: auto;
+        /* Allows scrolling if the content is too long */
+      }
+
+      .tab-content {
+        display: none;
+        /* Hide all tab content by default */
+        background-color: #fff;
+        padding: 20px;
+        border-radius: 8px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+      }
+
+      .tab-content.active {
+        display: block;
+        /* Show the active tab content */
+      }
+
+      button {
+        background-color: #4CAF50;
+        color: white;
+        padding: 10px 20px;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        margin: 5px;
+      }
+
+      /* Hover effect for all table rows */
+      table tbody tr:hover {
+        background-color: #e0f7fa;
+        /* Light blue background */
+      }
+
+      button:hover {
+        background-color: #4CAF50;
+      }
+
+      input[type="number"] {
+        padding: 8px;
+        width: 200px;
+        margin-right: 10px;
+        border-radius: 5px;
+        border: 1px solid #ccc;
+      }
+
+      .busy-button {
+        background-color: grey !important;
+        cursor: not-allowed !important;
+      }
+
+      #discoveries-container {
+        margin-top: 20px;
+        margin-bottom: 40px;
+        width: 100%;
+        height: 200px;
+        overflow-y: scroll;
+        border: 1px solid #ccc;
+        border-radius: 5px;
+        padding: 10px;
+        background-color: #fff;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 20px;
+        /* Added margin for spacing */
+        background-color: #fff;
+        /* Background color for tables */
+      }
+
+      th,
+      td {
+        padding: 8px;
+        text-align: left;
+        border-bottom: 1px solid #ddd;
+      }
+
+      tr.selected {
+        background-color: #e0f7fa;
+      }
+
+      button:disabled {
+        background-color: #d3d3d3;
+        color: #a0a0a0;
+        cursor: not-allowed;
+      }
+
+      .dropdown-content {
+        display: none;
+        position: absolute;
+        background-color: #f8f8f8;
+        min-width: 150px;
+        box-shadow: 0px 8px 16px 0px rgba(0, 0, 0, 0.2);
+        padding: 12px 16px;
+        z-index: 1;
+      }
+
+      div:hover .dropdown-content {
+        display: block;
+      }
+
+      #loading-spinner {
+        display: none;
+        text-align: center;
+        margin-top: 10px;
+      }
+
+      .spinner {
+        border: 4px solid #f3f3f3;
+        border-top: 4px solid #3498db;
+        border-radius: 50%;
+        width: 40px;
+        height: 40px;
+        animation: spin 1s linear infinite;
+      }
+
+      @keyframes spin {
+        0% {
+          transform: rotate(0deg);
+        }
+
+        100% {
+          transform: rotate(360deg);
+        }
+      }
+
+      #clash-members-progress-pill-container {
+        text-align: center;
+      }
+
+      #clash-members-progress-pill-bar {
+        width: 0%;
+        /* Start with 0% width */
+        height: 100%;
+        background-color: #4CAF50;
+        border-radius: 10px;
+        transition: width 0.5s ease;
+      }
+
+      #clash-members-progress-pill-text {
+        margin-top: 5px;
+        font-size: 14px;
+        font-weight: bold;
+      }
+
+      #quality-checks-progress-pill-text {
+        margin-top: 5px;
+        font-size: 14px;
+        font-weight: bold;
+      }
+
+      #quality-checks-passed-progress-pill-text {
+        margin-top: 5px;
+        font-size: 14px;
+        font-weight: bold;
+      }
+
+      .progress-container {
+        width: 100%;
+        background-color: #f3f3f3;
+        border-radius: 10px;
+        margin-top: 10px;
+      }
+
+      #progress-bar {
+        height: 20px;
+        background-color: #4CAF50;
+        border-radius: 10px;
+        transition: width 0.4s;
+      }
+
+      /* Style for all tables */
+      .container {
+        border: 1px solid #ccc;
+        border-radius: 5px;
+        padding: 10px;
+        background-color: #fff;
+        margin-top: 20px;
+        /* Added margin for spacing */
+      }
+    </style>
+  </head>
+  <body>
+    <div class="sidebar">
+      <button id="configuration-button" class="tab-button active" onclick="showTab(0)">Configuration <span id="configuration-spinner" class="button_spinner" style="display: none; margin-left: 5px;"></span>
+      </button>
+      <button class="tab-button" onclick="showTab(1)">Buy Credits</button>
+      <button class="tab-button" onclick="showTab(2)">Discover Klaviyo Profiles</button>
+      <button id="clashButton" class="tab-button" onclick="showTab(3)" style="display: none;" disabled>Clash Members and Profiles</button>
+      <button class="tab-button" onclick="showTab(4)">Diagnostics</button>
+      <button class="tab-button" onclick="showTab(5)">Community Events <span id="community-events-tab-spinner" class="button_spinner" style="display: none; margin-left: 5px;"></span>
+      </button>
+      <button id="loadCommunityDataTabButton" class="tab-button" onclick="showTab(6)">Load Community Data</button>
+    </div>
+    <div class="content">
+      <!-- Tab Content -->
+      <div class="tab-content" id="configuration-tab">
+        <div class="spinner" style="display: none; margin: 10px auto;"></div>
+        <h2>Configuration</h2>
+        <div class="checkbox-container" style="display: flex; flex-direction: column; align-items: flex-start; gap: 10px;">
+          <div style="display: flex; align-items: center;">
+            <input type="checkbox" id="test-mode-checkbox" onchange="toggleTestMode()" style="margin-right: 5px;">
+            <label for="test-mode-checkbox" class="checkbox-label">Enable Test Mode</label>
+          </div>
+          <div style="display: flex; align-items: center;">
+            <label for="max-workers-input" style="margin-right: 10px;">Max Workers:</label>
+            <input type="number" id="max-workers-input" placeholder="Enter max workers" style="margin-right: 10px;">
+            <button onclick="setMaxWorkers()" style="padding: 5px 10px;">Set Max Workers</button>
+          </div>
+          <!-- Input for Klaviyo Read Profile API Key -->
+          <div style="display: flex; align-items: center;">
+            <label for="klaviyo-api-key-input" style="margin-right: 10px;">Klaviyo API Key:</label>
+            <input type="text" id="klaviyo-api-key-input" placeholder="Enter Klaviyo API Key" style="margin-right: 10px;">
+            <button onclick="setKlaviyoApiKey()" style="padding: 5px 10px;">Set Klaviyo API Key</button>
+          </div>
+        </div>
+        <!-- Input for Community Client ID -->
+        <div style="display: flex; align-items: center;">
+          <label for="community-client-id-input" style="margin-right: 10px;">Community Client ID:</label>
+          <input type="text" id="community-client-id-input" placeholder="Enter Community Client ID" style="margin-right: 10px;">
+          <button onclick="setCommunityClientId()" style="padding: 5px 10px;">Set Community Client ID</button>
+        </div>
+        <!-- Input for Community API Token -->
+        <div style="display: flex; align-items: center;">
+          <label for="community-api-token-input" style="margin-right: 10px;">Community API Token:</label>
+          <input type="text" id="community-api-token-input" placeholder="Enter Community API Token" style="margin-right: 10px;">
+          <button onclick="setCommunityApiToken()" style="padding: 5px 10px;">Set Community API Token</button>
+        </div>
+        <!-- Input for Sub Community -->
+        <div style="display: flex; align-items: center;">
+          <label for="sub-community-input" style="margin-right: 10px;">Sub Community:</label>
+          <input type="text" id="sub-community-input" placeholder="Enter Sub Community" style="margin-right: 10px;">
+          <button onclick="setSubCommunity()" style="padding: 5px 10px;">Set Sub Community</button>
+        </div>
+      </div>
+      <div class="tab-content active" id="buy-credits">
+        <div class="spinner" style="display: none; margin: 10px auto;"></div>
+        <h2>Buy Credits</h2>
+        <p>Credit costs: 0.0005 cents USD per credit</p>
+        <p>Minimum bundle: 10,000 credits</p>
+        <input type="number" id="credits-input" placeholder="Enter number of credits (min 10,000)">
+        <button id="checkout-button">Checkout</button>
+      </div>
+      <div class="tab-content" id="data-collection">
+        <div class="spinner" style="display: none; margin: 10px auto;"></div>
+        <h2 id="discover-klaviyo-profiles-title">Discover Klaviyo Profiles</h2>
+        <button id="discover-klaviyo-button" onclick="discoverKlaviyoProfiles()">Discover Klaviyo</button>
+        <div id="discoveries-container">
+          <table id="discoveries-table">
+            <!-- The rows will be dynamically inserted here by the JavaScript -->
+          </table>
+        </div>
+        <div id="dropdown" class="dropdown">
+          <button id="download-all-files" onclick="downloadAllFiles()">Download All Files</button>
+          <button id="delete-klaviyo-discovery" onclick="deleteKlaviyoDiscovery()">Delete Discovery Record</button>
+          <div style="position: relative; display: inline-block;">
+            <button id="load-profiles">Load Profiles</button>
+            <div class="dropdown-content">
+              <label for="download-csv-checkbox" style="font-size: 14px;">
+                <input type="checkbox" id="download-csv-checkbox" style="margin-right: 5px;"> Download CSV </label>
+            </div>
+          </div>
+        </div>
+        <div id="loading-spinner">
+          <div class="spinner"></div>
+          <p>Loading...</p>
+        </div>
+        <h2 id="profile-table-title">Profile Count</h2>
+        <div class="container">
+          <table id="profile-count-table">
+            <thead>
+              <tr>
+                <th>With Phone</th>
+                <th>Without Phone</th>
+                <th>Duplicate Emails Discarded</th>
+                <!-- Add this new column -->
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td id="total-with-phone">0</td>
+                <td id="total-without-phone">0</td>
+                <td id="total-duplicate-emails-discarded">0</td>
+                <!-- Add this cell for duplicates -->
+                <td id="grand-total">0</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3 id="zip-sourced-from-table-title">Count of Profiles with ZIP codes</h3>
+        <div class="container">
+          <table id="zip-sourced-from-table">
+            <thead>
+              <tr>
+                <th>Sourced from the IP Address</th>
+                <th>Sourced from standard location attribute</th>
+                <th>Sourced from custom properties</th>
+                <th>Total</th>
+                <th>Increased ZIP Code count this percentage</th>
+                <th>In numbers thats</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td id="total-zip-from-ip-address">0</td>
+                <td id="total-zip-from-location-attribute">0</td>
+                <td id="total-zip-from-property-attribute">0</td>
+                <td id="total-zip">0</td>
+                <td id="total-percentage-increased-zip">0</td>
+                <td id="total-increased-zip">0</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3 id="profiles-failed-quality-checks-title">Profiles with Phone numbers that failed the quality checks</h3>
+        <div id="profiles-failed-quality-checks-view-container" class="table-container">
+          <!-- Progress Pill -->
+          <div id="quality-checks-progress-pill-container" style="display: none; margin-top: 10px;">
+            <div style="width: 100%; background-color: #f3f3f3; border-radius: 10px; position: relative; height: 20px;">
+              <div id="quality-checks-progress-pill-bar" style="width: 0%; height: 100%; background-color: #4CAF50; border-radius: 10px; transition: width 0.5s ease;"></div>
+            </div>
+            <p id="quality-checks-progress-pill-text" style="text-align: center; margin-top: 5px;">0%</p>
+          </div>
+          <!-- Static Table -->
+          <table id="quality-check-table">
+            <thead>
+              <tr>
+                <th>Invalid format</th>
+                <th>Too short</th>
+                <th>Too long</th>
+                <th>Duplicates</th>
+                <th>Invalid length for +1</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td id="invalid-format">0</td>
+                <td id="too-short">0</td>
+                <td id="too-long">0</td>
+                <td id="duplicates">0</td>
+                <td id="invalid-length">0</td>
+                <td id="total-failed">0</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <!-- Dynamic Table -->
+        <h3 id="dynamic-quality-checks-table-title">Click a cell above to populate the table below with details</h3>
+        <div id="quality-checks-dynamic-container" class="table-container">
+          <div class="table-spinner" style="display: none;"></div>
+          <table id="quality-checks-view-table">
+            <thead>
+              <tr>
+                <th onclick="sortTable('quality-checks-view-table', 0, 'quality-checks-dynamic-container')">First Name</th>
+                <th onclick="sortTable('quality-checks-view-table', 1, 'quality-checks-dynamic-container')">Last Name</th>
+                <th onclick="sortTable('quality-checks-view-table', 2, 'quality-checks-dynamic-container')">Email</th>
+                <th onclick="sortTable('quality-checks-view-table', 3, 'quality-checks-dynamic-container')">Phone Number</th>
+                <th onclick="sortTable('quality-checks-view-table', 4, 'quality-checks-dynamic-container')">Birthday</th>
+                <th onclick="sortTable('quality-checks-view-table', 5, 'quality-checks-dynamic-container')">Gender</th>
+                <th onclick="sortTable('quality-checks-view-table', 6, 'quality-checks-dynamic-container')">City</th>
+                <th onclick="sortTable('quality-checks-view-table', 7, 'quality-checks-dynamic-container')">Region</th>
+                <th onclick="sortTable('quality-checks-view-table', 8, 'quality-checks-dynamic-container')">ZIP</th>
+                <th onclick="sortTable('quality-checks-view-table', 9, 'quality-checks-dynamic-container')">Country</th>
+                <th onclick="sortTable('quality-checks-view-table', 10, 'quality-checks-dynamic-container')">Longitude</th>
+                <th onclick="sortTable('quality-checks-view-table', 11, 'quality-checks-dynamic-container')">Latitude</th>
+                <th onclick="sortTable('quality-checks-view-table', 12, 'quality-checks-dynamic-container')">Drop Reason</th>
+              </tr>
+            </thead>
+            <tbody id="quality-checks-view-table-body">
+              <!-- Rows will be populated dynamically via JavaScript -->
+            </tbody>
+          </table>
+        </div>
+        <button id="download-failed-profiles" onclick="downloadFailedProfiles()" disabled>Download Profiles Failed Quality Checks</button>
+        <h3 id="profiles-passed-quality-checks-title">Profiles with Phone numbers that passed the quality checks</h3>
+        <div id="profiles-passed-quality-checks-view-container" class="table-container">
+          <!-- Progress Pill -->
+          <div id="quality-checks-passed-progress-pill-container" style="display: none; margin-top: 10px;">
+            <div style="width: 100%; background-color: #f3f3f3; border-radius: 10px; position: relative; height: 20px;">
+              <div id="quality-checks-passed-progress-pill-bar" style="width: 0%; height: 100%; background-color: #4CAF50; border-radius: 10px; transition: width 0.5s ease;"></div>
+            </div>
+            <p id="quality-checks-passed-progress-pill-text" style="text-align: center; margin-top: 5px;">0%</p>
+          </div>
+          <!-- Static Table -->
+          <table id="passed-quality-check-table">
+            <thead>
+              <tr>
+                <th>SMS</th>
+                <th>WhatsApp</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td id="sms-passed">0</td>
+                <td id="whatsapp-passed">0</td>
+                <td id="total-passed">0</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <!-- Dynamic Table -->
+        <h3 id="dynamic-quality-checks-passed-table-title">Click a cell above to populate the table below with details</h3>
+        <div id="quality-checks-passed-dynamic-container" class="table-container">
+          <div class="table-spinner" style="display: none;"></div>
+          <table id="quality-checks-passed-view-table">
+            <thead>
+              <tr>
+                <th onclick="sortTable('quality-checks-passed-view-table', 0, 'quality-checks-passed-dynamic-container')">First Name</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 1, 'quality-checks-passed-dynamic-container')">Last Name</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 2, 'quality-checks-passed-dynamic-container')">Email</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 3, 'quality-checks-passed-dynamic-container')">Phone Number</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 4, 'quality-checks-passed-dynamic-container')">Birthday</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 5, 'quality-checks-passed-dynamic-container')">Gender</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 6, 'quality-checks-passed-dynamic-container')">City</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 7, 'quality-checks-passed-dynamic-container')">Region</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 8, 'quality-checks-passed-dynamic-container')">ZIP</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 9, 'quality-checks-passed-dynamic-container')">Country</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 10, 'quality-checks-passed-dynamic-container')">Longitude</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 11, 'quality-checks-passed-dynamic-container')">Latitude</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 12, 'quality-checks-passed-dynamic-container')">Channel</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 13, 'quality-checks-passed-dynamic-container')">Created</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 14, 'quality-checks-passed-dynamic-container')">Updated</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 15, 'quality-checks-passed-dynamic-container')">Last Event</th>
+                <th onclick="sortTable('quality-checks-passed-view-table', 16, 'quality-checks-passed-dynamic-container')">IP Address</th>
+              </tr>
+            </thead>
+            <tbody id="quality-checks-passed-view-table-body">
+              <!-- Rows will be populated dynamically via JavaScript -->
+            </tbody>
+          </table>
+        </div>
+        <button id="download-passed-profiles" onclick="downloadEligibleProfiles()" disabled>Download Profiles That Passed Quality Checks</button>
+        <button id="sync-klaviyo-profile-to-community-from-passed-quality-view-table-button" disabled style="background-color: grey; cursor: not-allowed;">Sync Profile to Community</button>
+        <button id="sync-all-klaviyo-profile-to-community-from-passed-quality-view-table-button">Sync All Profiles to Community</button>
+      </div>
+      <div class="tab-content" id="clash-members-profiles">
+        <div class="spinner" style="display: none; margin: 10px auto;"></div>
+        <h2 id="members-clash-title">Clash Members and Profiles</h2>
+        <button id="clash-members-profiles-button" onclick="clashMembersProfiles()">Clash Members and Profiles</button>
+        <button id="create-staging-files-button" onclick="createStagingFiles()">Create Staging Files</button>
+        <div id="clash-members-progress-pill-container" style="display: none; margin-top: 10px;">
+          <div style="width: 100%; background-color: #f3f3f3; border-radius: 10px; position: relative; height: 20px;">
+            <div id="clash-members-progress-pill-bar" style="width: 0%; height: 100%; background-color: #4CAF50; border-radius: 10px; transition: width 0.5s ease;"></div>
+          </div>
+          <p id="clash-members-progress-pill-text" style="text-align: center; margin-top: 5px;">0%</p>
+        </div>
+        <div id="clashed-members-view-container" class="table-container">
+          <!-- Spinner for loading state -->
+          <div id="clash-loading-spinner" style="display: none;">
+            <div class="spinner"></div>
+            <p>Processing...</p>
+          </div>
+          <div class="container">
+            <table id="members-clash-table">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>Live</th>
+                  <th>Opted-out</th>
+                  <th>Deleted</th>
+                  <th>Total (excludes Deleted)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th>Members Already In Klaviyo</th>
+                  <td id="matched-live">0</td>
+                  <td id="matched-opted-out">0</td>
+                  <td id="matched-deleted">Unknown</td>
+                  <td id="matched-total">0</td>
+                </tr>
+                <tr>
+                  <th>Members Not In Klaviyo</th>
+                  <td id="non-matched-live">0</td>
+                  <td id="non-matched-opted-out">0</td>
+                  <td id="non-matched-deleted">Unknown</td>
+                  <td id="non-matched-total">0</td>
+                </tr>
+                <tr>
+                  <th>Totals</th>
+                  <td id="total-live">0</td>
+                  <td id="total-opted-out">0</td>
+                  <td id="total-deleted">0</td>
+                  <td id="grand-total-of-members">0</td>
+                </tr>
+              </tbody>
+            </table>
+            <h3 id="dynamic-clashed-members-table-title">Click a cell above to populate the table below with details</h3>
+            <div class="table-spinner" style="display: none;"></div>
+            <table id="clashed-members-view-table">
+              <thead>
+                <tr>
+                  <th onclick="sortTable('clashed-members-view-table', 0, 'clashed-members-view-container')">MEMBER_ID</th>
+                  <th onclick="sortTable('clashed-members-view-table', 1, 'clashed-members-view-container')">LEADER_ID</th>
+                  <th onclick="sortTable('clashed-members-view-table', 2, 'clashed-members-view-container')">CHANNEL</th>
+                  <th onclick="sortTable('clashed-members-view-table', 3, 'clashed-members-view-container')">PHONE_NUMBER</th>
+                  <th onclick="sortTable('clashed-members-view-table', 4, 'clashed-members-view-container')">SUBSCRIPTION_STATE</th>
+                  <th onclick="sortTable('clashed-members-view-table', 5, 'clashed-members-view-container')">FIRST_NAME</th>
+                  <th onclick="sortTable('clashed-members-view-table', 6, 'clashed-members-view-container')">LAST_NAME</th>
+                  <th onclick="sortTable('clashed-members-view-table', 7, 'clashed-members-view-container')">EMAIL</th>
+                  <th onclick="sortTable('clashed-members-view-table', 8, 'clashed-members-view-container')">DATE_OF_BIRTH</th>
+                  <th onclick="sortTable('clashed-members-view-table', 9, 'clashed-members-view-container')">GENDER</th>
+                  <th onclick="sortTable('clashed-members-view-table', 10, 'clashed-members-view-container')">CITY</th>
+                  <th onclick="sortTable('clashed-members-view-table', 11, 'clashed-members-view-container')">ZIP_CODE</th>
+                  <th onclick="sortTable('clashed-members-view-table', 12, 'clashed-members-view-container')">STATE</th>
+                  <th onclick="sortTable('clashed-members-view-table', 13, 'clashed-members-view-container')">STATE_CODE</th>
+                  <th onclick="sortTable('clashed-members-view-table', 14, 'clashed-members-view-container')">COUNTRY</th>
+                  <th onclick="sortTable('clashed-members-view-table', 15, 'clashed-members-view-container')">COUNTRY_CODE</th>
+                  <th onclick="sortTable('clashed-members-view-table', 16, 'clashed-members-view-container')">DEVICE_TYPE</th>
+                  <th onclick="sortTable('clashed-members-view-table', 17, 'clashed-members-view-container')">FIRST_ACTIVATED_AT</th>
+                </tr>
+              </thead>
+              <tbody id="clashed-members-view-table-body">
+                <!-- Rows will be populated here by JavaScript -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <button id="add-clashed-member-to-klaviyo-list-button" disabled style="background-color: grey; cursor: not-allowed;">Add Member to Klaviyo List</button>
+        <button id="sync-clashed-member-to-klaviyo-button" disabled style="background-color: grey; cursor: not-allowed;">Sync Member to Klaviyo</button>
+        <h3>Profiles Already in Community</h3>
+        <div class="container">
+          <table id="profiles-community-table">
+            <thead>
+              <tr>
+                <th></th>
+                <th>SMS</th>
+                <th>WhatsApp</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th>Live</th>
+                <td id="live-sms">0</td>
+                <td id="live-whatsapp">0</td>
+                <td id="live-total">0</td>
+              </tr>
+              <tr>
+                <th>Opt Out</th>
+                <td id="optout-sms">0</td>
+                <td id="optout-whatsapp">0</td>
+                <td id="optout-total">0</td>
+              </tr>
+              <tr>
+                <th>Total</th>
+                <td id="total-sms">0</td>
+                <td id="total-whatsapp">0</td>
+                <td id="total-community">0</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>Profiles Eligible to Import into Community</h3>
+        <div class="container">
+          <table id="eligible-profiles-table">
+            <thead>
+              <tr>
+                <th>SMS</th>
+                <th>WhatsApp</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td id="eligible-sms">0</td>
+                <td id="eligible-whatsapp">0</td>
+                <td id="eligible-total">0</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <button id="download-eligible-profiles" onclick="downloadEligibleProfiles()" disabled>Download Profiles Eligible to Import into Community</button>
+        <h3>SMS Profiles Eligible to Import into Community</h3>
+        <div class="container">
+          <div id="profiles-container" class="table-container">
+            <table id="profiles-table">
+              <thead>
+                <tr>
+                  <th>Email</th>
+                  <th>Phone Number</th>
+                  <th>First Name</th>
+                  <th>Last Name</th>
+                  <th>City</th>
+                  <th>Country</th>
+                  <th>Region</th>
+                  <th>Zip</th>
+                  <th>Latitude</th>
+                  <th>Longitude</th>
+                  <th>Birthday</th>
+                  <th>Gender</th>
+                  <th>Created</th>
+                  <th>Dummy Email</th>
+                </tr>
+              </thead>
+              <tbody id="profiles-table-body">
+                <!-- Profiles will be populated here dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div id="sms-profiles-eligible-to-import-into-community-pagination-container" class="pagination-container"></div>
+        <h3>Import Summary</h3>
+        <div id="import-summary-section" style="display: none;">
+          <table id="import-summary-table" class="table table-striped">
+            <thead>
+              <tr>
+                <th>Import Started</th>
+                <th>Import Ended</th>
+                <th>Total Time Taken</th>
+                <th>Test Mode Enabled</th>
+                <th>Max Workers</th>
+                <th>Imported Count</th>
+                <th>Total Profiles</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td id="import-started"></td>
+                <td id="import-ended"></td>
+                <td id="total-time"></td>
+                <td id="test-mode"></td>
+                <td id="max-workers"></td>
+                <td id="imported-count"></td>
+                <td id="total-profiles"></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <button id="import-selected-profile-button" disabled>Import Selected Profile</button>
+        <div style="position: relative; display: inline-block;">
+          <button id="import-all-profiles-button" onclick="triggerCommunityImportAll()">Import All Profiles</button>
+          <!-- Spinner and Progress Bar container -->
+          <div id="successful-imports-count-spinner" style="display: none; text-align: center;">
+            <div class="spinner"></div>
+            <!-- Spinner animation -->
+            <!-- Progress Bar Container -->
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 10px;">
+              <p style="margin: 0; padding-right: 10px;">Importing Profiles</p>
+              <div class="progress-container" style="flex-grow: 1; background-color: #f3f3f3; border-radius: 10px; height: 20px; margin-left: 10px; position: relative;">
+                <div id="progress-bar" style="width: 0%; height: 100%; background-color: #4CAF50; border-radius: 10px; transition: width 0.5s ease;"></div>
+              </div>
+            </div>
+            <!-- Percentage Completed -->
+            <p>
+              <span id="progress-percent">0</span>% completed
+            </p>
+          </div>
+        </div>
+        <h3>Members Not in Klaviyo</h3>
+        <div class="container">
+          <table id="members-not-in-klaviyo-table">
+            <thead>
+              <tr>
+                <th></th>
+                <th>SMS</th>
+                <th>WhatsApp</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th>Live</th>
+                <td id="members-not-in-klayvio-live-sms">0</td>
+                <td id="members-not-in-klayvio-live-whatsapp">0</td>
+                <td id="members-not-in-klayvio-live-total">0</td>
+              </tr>
+              <tr>
+                <th>Opt Out</th>
+                <td id="members-not-in-klayvio-optout-sms">0</td>
+                <td id="members-not-in-klayvio-optout-whatsapp">0</td>
+                <td id="members-not-in-klayvio-optout-total">0</td>
+              </tr>
+              <tr>
+                <th>Total</th>
+                <td id="members-not-in-klayvio-total-sms">0</td>
+                <td id="members-not-in-klayvio-total-whatsapp">0</td>
+                <td id="members-not-in-klayvio-total">0</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <button id="download-members-not-in-klaviyo" onclick="downloadMembersNotInKlaviyo()" disabled>Download Members Not in Klaviyo</button>
+      </div>
+      <div class="tab-content" id="server-status">
+        <div class="spinner" style="display: none; margin: 10px auto;"></div>
+        <h3 id="server-status-title">Server Status</h3>
+        <div class="container">
+          <table id="server-status-table">
+            <thead>
+              <tr>
+                <th>Credits</th>
+                <th>Service Count</th>
+                <th>User Status</th>
+                <th>Profile Count</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td id="credits-value">0</td>
+                <td id="service-count-value">0</td>
+                <td id="user-status-value">Inactive</td>
+                <td id="profile-count-value">0</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <button id="check-server-status-button">Check Server Status</button>
+        <div id="redis-status-result" style="color: grey;"></div>
+        <!-- Table will be displayed here -->
+        <button id="redis-status-button" style="background-color: grey;" onclick="checkRedisStatus()">Check Redis Status</button>
+      </div>
+
+      <div class="tab-content" id="community-events-tab">
+        <h2>Community Member Events <span id="community-events-count">(0)</span>
+        </h2>
+        <!-- Add the metrics display here -->
+        <div id="events-metrics-container" style="margin-bottom: 10px; font-weight: bold;">
+          <span id="community-events-memory-metrics">Number of events: 0, Memory used: 0 bytes</span>
+        </div>
+        <div class="container">
+<div id="community-events-container" class="table-container">
+  <table id="community-events-table">
+    <thead>
+      <tr>
+        <th onclick="showSortFilterUI('timestamp', event)">Timestamp</th>
+        <th onclick="showSortFilterUI('type', event)">Type</th>
+        <th onclick="showSortFilterUI('active', event)">Active</th>
+        <th onclick="showSortFilterUI('communication_channel', event)">Communication Channel</th>
+        <th onclick="showSortFilterUI('communication_channel_id', event)">Communication Channel ID</th>
+        <th onclick="showSortFilterUI('given_name', event)">Given Name</th>
+        <th onclick="showSortFilterUI('surname', event)">Surname</th>
+        <th onclick="showSortFilterUI('email', event)">Email</th>
+        <th onclick="showSortFilterUI('date_of_birth', event)">Date of Birth</th>
+        <th onclick="showSortFilterUI('gender_identity', event)">Gender Identity</th>
+        <th onclick="showSortFilterUI('postal_code', event)">Postal Code</th>
+        <th onclick="showSortFilterUI('country_code', event)">Country Code</th>
+        <th onclick="showSortFilterUI('longitude', event)">Longitude</th>
+        <th onclick="showSortFilterUI('latitude', event)">Latitude</th>
+        <th onclick="showSortFilterUI('city', event)">City</th>
+        <th onclick="showSortFilterUI('state_or_province', event)">State or Province</th>
+        <th onclick="showSortFilterUI('state_or_province_abbreviation', event)">State Code</th>
+        <th onclick="showSortFilterUI('country', event)">Country</th>
+        <th onclick="showSortFilterUI('client_id', event)">Client ID</th>
+        <th onclick="showSortFilterUI('id', event)">Member ID</th>
+      </tr>
+    </thead>
+    <tbody id="community-events-table-body">
+      <!-- Rows will be dynamically populated here -->
+    </tbody>
+  </table>
+</div>
+  <div id="sort-filter-ui" style="display: none;" class="sort-filter-panel">
+    <h3>Sort</h3>
+    <label for="sort-column-select">Column:</label>
+    <select id="sort-column-select"></select>
+    <label for="sort-order-select">Order:</label>
+    <select id="sort-order-select">
+      <option value="asc">Ascending (1, 2, 3...)</option>
+      <option value="desc">Descending (3, 2, 1...)</option>
+    </select>
+    <button onclick="applySort()">Apply Sort</button>
+    <button onclick="hideSortFilterUI()">Close</button>
+  </div>
+
+          <div id="community-events-page-indicator" class="page-indicator"></div>
+          <div id="community-events-pagination-container" class="pagination-container"></div>
+          <button id="fetch-community-member-events-button">Fetch <span id="event-fetch-spinner" class="button_spinner" style="display: none;"></span>
+          </button>
+          <button id="clear-community-member-events-button" disabled>Unload <span id="event-unload-spinner" class="button_spinner" style="display: none;"></span>
+          </button>
+          <button id="load-community-member-events-from-filebutton">Load <span id="event-loader-spinner" class="button_spinner" style="display: none;"></span>
+          </button>
+          <div id="selected-member-events-container" class="table-container">
+            <div class="table-spinner"></div>
+            <h3>Selected Member Events</h3>
+            <table id="selected-member-events-table">
+              <thead>
+                <tr>
+                  <th onclick="sortTable('selected-member-events-table', 0, 'selected-member-events-container')">Timestamp</th>
+                  <th onclick="sortTable('selected-member-events-table', 1, 'selected-member-events-container')">Type</th>
+                  <th onclick="sortTable('selected-member-events-table', 2, 'selected-member-events-container')">Active</th>
+                  <th onclick="sortTable('selected-member-events-table', 3, 'selected-member-events-container')">Communication Channel</th>
+                  <th onclick="sortTable('selected-member-events-table', 4, 'selected-member-events-container')">Communication Channel ID</th>
+                  <th onclick="sortTable('selected-member-events-table', 5, 'selected-member-events-container')">Given Name</th>
+                  <th onclick="sortTable('selected-member-events-table', 6, 'selected-member-events-container')">Surname</th>
+                  <th onclick="sortTable('selected-member-events-table', 7, 'selected-member-events-container')">Email</th>
+                  <th onclick="sortTable('selected-member-events-table', 8, 'selected-member-events-container')">Date of Birth</th>
+                  <th onclick="sortTable('selected-member-events-table', 9, 'selected-member-events-container')">Gender Identity</th>
+                  <th onclick="sortTable('selected-member-events-table', 10, 'selected-member-events-container')">Postal Code</th>
+                  <th onclick="sortTable('selected-member-events-table', 11, 'selected-member-events-container')">Country Code</th>
+                  <th onclick="sortTable('selected-member-events-table', 12, 'selected-member-events-container')">Longitude</th>
+                  <th onclick="sortTable('selected-member-events-table', 13, 'selected-member-events-container')">Latitude</th>
+                  <th onclick="sortTable('selected-member-events-table', 14, 'selected-member-events-container')">City</th>
+                  <th onclick="sortTable('selected-member-events-table', 15, 'selected-member-events-container')">State or Province</th>
+                  <th onclick="sortTable('selected-member-events-table', 16, 'selected-member-events-container')">State Code</th>
+                  <th onclick="sortTable('selected-member-events-table', 17, 'selected-member-events-container')">Country</th>
+                  <th onclick="sortTable('selected-member-events-table', 18, 'selected-member-events-container')">Client ID</th>
+                  <th onclick="sortTable('selected-member-events-table', 19, 'selected-member-events-container')">Member ID</th>
+                </tr>
+              </thead>
+              <tbody id="selected-member-events-table-body">
+                <!-- Rows will be dynamically populated via JavaScript -->
+              </tbody>
+            </table>
+          </div>
+          <div id="selected-member-message-events-container" class="table-container">
+            <div class="table-spinner"></div>
+            <h3>Messages</h3>
+            <table id="selected-member-message-events-table">
+              <thead>
+                <tr>
+                  <th onclick="sortTable('selected-member-message-events-table', 0, 'selected-member-message-events-container')">Timestamp</th>
+                  <th onclick="sortTable('selected-member-message-events-table', 1, 'selected-member-message-events-container')">Direction</th>
+                  <th onclick="sortTable('selected-member-message-events-table', 2, 'selected-member-message-events-container')">Type of Message</th>
+                  <th onclick="sortTable('selected-member-message-events-table', 3, 'selected-member-message-events-container')">Campaign ID/th>
+                  <th onclick="sortTable('selected-member-message-events-table', 4, 'selected-member-message-events-container')">Text</th>
+                </tr>
+              </thead>
+              <tbody id="selected-member-message-events-table-body">
+                <!-- Rows will be dynamically populated via JavaScript -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="tab-content" id="load-community-data">
+        <div class="spinner" style="display: none; margin: 10px auto;"></div>
+        <h2>Community Members</h2>
+        <button id="load-community-members-button" onclick="uploadCommunityMembersFile()" style="position: relative; background-color: grey; cursor: not-allowed;">
+          <span id="load-community-members-button-text">Load</span>
+          <div id="community-members-file-upload-spinner" style="display: none;">
+            <div class="spinner"></div>
+          </div>
+        </button>
+        <button id="flush-community-members-from-redis-button" onclick="unloadCommunityMembersData()" disabled style="background-color: grey; cursor: not-allowed;">Unload</button>
+        <h2 id="members-table-title">Members loaded</h2>
+        <div class="container">
+          <table id="members-count-table">
+            <thead>
+              <tr>
+                <th>Deleted</th>
+                <th>Live</th>
+                <th>Opt Out</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td id="members-deleted">0</td>
+                <td id="members-live">0</td>
+                <td id="members-opt-out">0</td>
+                <td id="members-total">0</td>
+              </tr>
+            </tbody>
+          </table>
+          <div id="community-member-view-container" class="table-container">
+            <div class="table-spinner" style="display: none;"></div>
+            <table id="community-member-view-table">
+              <thead>
+                <tr>
+                  <th onclick="sortTable('community-member-view-table', 0, 'community-member-view-container')">MEMBER_ID</th>
+                  <th onclick="sortTable('community-member-view-table', 1, 'community-member-view-container')">LEADER_ID</th>
+                  <th onclick="sortTable('community-member-view-table', 2, 'community-member-view-container')">CHANNEL</th>
+                  <th onclick="sortTable('community-member-view-table', 3, 'community-member-view-container')">PHONE_NUMBER</th>
+                  <th onclick="sortTable('community-member-view-table', 4, 'community-member-view-container')">SUBSCRIPTION_STATE</th>
+                  <th onclick="sortTable('community-member-view-table', 5, 'community-member-view-container')">FIRST_NAME</th>
+                  <th onclick="sortTable('community-member-view-table', 6, 'community-member-view-container')">LAST_NAME</th>
+                  <th onclick="sortTable('community-member-view-table', 7, 'community-member-view-container')">EMAIL</th>
+                  <th onclick="sortTable('community-member-view-table', 8, 'community-member-view-container')">DATE_OF_BIRTH</th>
+                  <th onclick="sortTable('community-member-view-table', 9, 'community-member-view-container')">GENDER</th>
+                  <th onclick="sortTable('community-member-view-table', 10, 'community-member-view-container')">CITY</th>
+                  <th onclick="sortTable('community-member-view-table', 11, 'community-member-view-container')">ZIP_CODE</th>
+                  <th onclick="sortTable('community-member-view-table', 12, 'community-member-view-container')">STATE</th>
+                  <th onclick="sortTable('community-member-view-table', 13, 'community-member-view-container')">STATE_CODE</th>
+                  <th onclick="sortTable('community-member-view-table', 14, 'community-member-view-container')">COUNTRY</th>
+                  <th onclick="sortTable('community-member-view-table', 15, 'community-member-view-container')">COUNTRY_CODE</th>
+                  <th onclick="sortTable('community-member-view-table', 16, 'community-member-view-container')">DEVICE_TYPE</th>
+                  <th onclick="sortTable('community-member-view-table', 17, 'community-member-view-container')">FIRST_ACTIVATED_AT</th>
+                </tr>
+              </thead>
+              <tbody id="community-member-view-table-body">
+                <!-- Rows will be populated here by JavaScript -->
+              </tbody>
+            </table>
+          </div>
+          <button id="add-community-member-to-klaviyo-list-button" disabled style="background-color: grey; cursor: not-allowed;">Add Member to Klaviyo List</button>
+          <button id="sync-community-member-to-klaviyo-button" disabled style="background-color: grey; cursor: not-allowed;">Sync Member to Klaviyo</button>
+        </div>
+        <h2>Communities</h2>
+        <button id="load-communities-button" onclick="uploadCommunitysubCommunitiesFile()" style="position: relative; background-color: green; cursor: pointer;">
+          <span id="load-communities-button-text">Load the Communities</span>
+          <div id="community-communities-file-upload-spinner" style="display: none;">
+            <div class="spinner"></div>
+          </div>
+        </button>
+        <button id="load-community-memberships-button" onclick="uploadCommunityMembershipsFile()" style="position: relative; background-color: green; cursor: pointer;">
+          <span id="load-community-memberships-button-text">Load their Memberships</span>
+          <div id="community-memberships-file-upload-spinner" style="display: none;">
+            <div class="spinner"></div>
+          </div>
+        </button>
+        <h2 id="communities-table-title">Communities not Loaded</h2>
+        <h2 id="community-membership-table-title">Memberships not loaded</h2>
+        <div class="communities-table-container">
+          <div class="table-spinner" style="display: none;"></div>
+          <table id="communities-count-table" data-sort-order="asc">
+            <thead>
+              <tr>
+                <th onclick="sortTable('communities-count-table', 0, 'communities-count-table')">ID</th>
+                <th onclick="sortTable('communities-count-table', 1, 'communities-count-table')">Name</th>
+                <th onclick="sortTable('communities-count-table', 2, 'communities-count-table')">Count</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- Table rows dynamically generated by JavaScript -->
+            </tbody>
+          </table>
+        </div>
+        <button id="view-communities-button" onclick="TODO()" disabled style="background-color: grey; cursor: not-allowed;">View</button>
+        <button id="sync-communities-to-klaviyo-button" disabled style="background-color: grey; cursor: not-allowed;">Sync to Klaviyo</button>
+        <button id="flush-communities-from-redis-button" onclick="unload_Community_subCommunities_and_Memberships_Data()" disabled style="background-color: grey; cursor: not-allowed;">Unload</button>
+      </div>
+      <!-- Logout button below Server Status -->
+      <div style="margin-top: 20px;">
+        <button id="logout-button" onclick="logout()">Logout</button>
+      </div>
+    </div>
+    <div id="community-members-container"></div>
+    <!-- Load the Stripe script -->
+    <script src="https://js.stripe.com/v3/"></script>
+    <script type="module" src="/static/stripe.js"></script>
+    <script type="module" src="/static/scripts.js"></script>
+    <script type="module" src="/static/clash.js"></script>
+    <script type="module" src="/static/login.js"></script>
+    <script type="module">
+      import {
+        handleColumnSort,
+        sortGlobalEvents,
+        createCommunityMemberEventsPagination
+      } from '/static/events.js';
+      // Expose the functions globally
+      window.handleColumnSort = handleColumnSort;
+      window.sortGlobalEvents = sortGlobalEvents;
+      window.createCommunityMemberEventsPagination = createCommunityMemberEventsPagination;
+    </script>
+    <script type="module" src="/static/communityFileUpload.js"></script>
+    <script type="module">
+      import {
+        initializePage
+      } from '/static/client.js';
+      document.addEventListener("DOMContentLoaded", async () => {
+        try {
+          await initializePage();
+        } catch (error) {
+          console.error("Error initializing client page:", error);
+        }
+      });
+    </script>
+    <script type="module">
+      import {
+        discoverKlaviyoProfiles,
+        selectRow,
+        deleteKlaviyoDiscovery,
+        downloadAllFiles
+      } from '/static/klaviyo.js';
+      window.discoverKlaviyoProfiles = discoverKlaviyoProfiles
+      window.deleteKlaviyoDiscovery = deleteKlaviyoDiscovery
+      window.downloadAllFiles = downloadAllFiles
+    </script>
+    <script type="module">
+      import {
+        showTab
+      } from '/static/client.js';
+      window.showTab = showTab;
+    </script>
+    <script type="module">
+      import {
+        logout
+      } from '/static/logout.js';
+      window.logout = logout
+    </script>
+    <script type="module">
+      import {
+        sortTable,
+        sortTableWithYield,
+        applySort,
+        hideSortFilterUI,
+        showSortFilterUI
+      } from '/static/tables.js';
+      window.sortTable = sortTable
+      window.sortTableWithYield = sortTableWithYield
+      window.applySort = applySort
+      window.hideSortFilterUI = hideSortFilterUI
+      window.showSortFilterUI = showSortFilterUI
+    </script>
+    <script type="module">
+      import {
+        triggerCommunityImportAll
+      } from '/static/communityImport.js';
+      window.triggerCommunityImportAll = triggerCommunityImportAll
+    </script>
+    <script type="module">
+      import {
+        clashMembersProfiles,
+        downloadMembersNotInKlaviyo
+      } from '/static/clash.js';
+      window.clashMembersProfiles = clashMembersProfiles
+      window.downloadMembersNotInKlaviyo = downloadMembersNotInKlaviyo
+    </script>
+    <script type="module">
+      import {
+        createStagingFiles
+      } from '/static/staging.js';
+      window.createStagingFiles = createStagingFiles
+    </script>
+    <script type="module">
+      import {
+        checkRedisStatus
+      } from '/static/redis.js';
+      window.checkRedisStatus = checkRedisStatus
+    </script>
+    <script type="module">
+      import {
+        setMaxWorkers,
+        setKlaviyoApiKey,
+        setCommunityClientId,
+        setSubCommunity,
+        setCommunityApiToken,
+        toggleTestMode
+      } from '/static/settings.js';
+      window.setMaxWorkers = setMaxWorkers; // Expose it globally for onclick
+      window.setKlaviyoApiKey = setKlaviyoApiKey; // Expose it globally for onclick
+      window.setCommunityClientId = setCommunityClientId; // Expose it globally for onclick
+      window.setSubCommunity = setSubCommunity; // Expose it globally for onclick
+      window.setCommunityApiToken = setCommunityApiToken; // Expose it globally for onclick
+      window.toggleTestMode = toggleTestMode;
+    </script>
+    <script type="module">
+      import {
+        downloadEligibleProfiles,
+        downloadFailedProfiles
+      } from '/static/profiles.js';
+      window.downloadEligibleProfiles = downloadEligibleProfiles;
+      window.downloadFailedProfiles = downloadFailedProfiles;
+    </script>
+    <script type="module">
+      import {
+        uploadCommunityMembershipsFile,
+        uploadCommunitysubCommunitiesFile,
+        uploadCommunityMembersFile,
+        unloadCommunityMembersData,
+        unload_Community_subCommunities_and_Memberships_Data
+      } from '/static/communityFileUpload.js';
+      window.uploadCommunityMembershipsFile = uploadCommunityMembershipsFile;
+      window.uploadCommunitysubCommunitiesFile = uploadCommunitysubCommunitiesFile;
+      window.uploadCommunityMembersFile = uploadCommunityMembersFile;
+      window.unloadCommunityMembersData = unloadCommunityMembersData;
+      window.unload_Community_subCommunities_and_Memberships_Data = unload_Community_subCommunities_and_Memberships_Data;
+    </script>
+  </body>
+</html>

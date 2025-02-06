@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Client and Stripe Checkout</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f8f8f8;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            justify-content: space-evenly;
+        }
+        .container, .api-container {
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        input {
+            margin: 5px;
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+            width: 80%;
+        }
+        #credits, #limits, #usage {
+            margin-top: 20px;
+        }
+        #usage-graph-container {
+            width: 80%;
+            height: 400px;
+        }
+        .section {
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Buy API Access</h1>
+        <p>Credit costs: 0.0005 cents USD per credit</p>
+        <p>Minimum bundle: 10,000 credits</p>
+        <input type="number" id="credits-input" placeholder="Enter number of credits (min 10,000)">
+        <button id="checkout-button">Checkout</button>
+        <p id="calculated-value"></p>
+    </div>
+    <div class="api-container">
+        <h1>API Client Test</h1>
+        <button onclick="login()">Login</button>
+        <button onclick="fetchProtectedResource()" id="fetch-protected-button">Fetch Protected Resource</button>
+        <button onclick="refreshAccessToken()">Refresh Access Token</button>
+        <button onclick="logout()">Logout</button>
+        <button onclick="revokeTokens()">Revoke Tokens</button>
+        <button onclick="debugTokens()">Debug Tokens</button>
+        <button onclick="fetchProtectedResourceWithRefreshToken()">Fetch with Refresh Token</button>
+        <div id="credits"></div>
+        <div id="limits"></div>
+        <div id="usage"></div>
+        <div id="usage-graph-container">
+            <canvas id="usage-graph"></canvas>
+        </div>
+        <div class="section">
+            <h2>Monitoring</h2>
+            <input type="number" id="interval-input" placeholder="Enter interval in minutes">
+            <button id="monitor-button" onclick="toggleMonitoring()">Start Monitoring</button>
+        </div>
+        <div class="section">
+            <h2>Burst Test</h2>
+            <label for="burst-number">Number of bursts:</label>
+            <input type="number" id="burst-number" placeholder="10">
+            <label for="burst-interval">Interval between bursts (seconds):</label>
+            <input type="number" id="burst-interval" placeholder="1">
+            <label for="burst-requests">Requests per burst:</label>
+            <input type="number" id="burst-requests" placeholder="10">
+            <button id="burst-button" onclick="toggleBurstTest()">Start Burst Test</button>
+        </div>
+		<div class="section">
+    		<h2>Database Throughput Test</h2>
+    		<label for="throughput-count">Number of Requests:</label>
+    		<input type="number" id="throughput-count" placeholder="100">
+    		<button onclick="testDatabaseThroughput()">Test Throughput</button>
+    		<div id="throughput-result"></div>
+		</div>
+    </div>
+
+    <script src="https://js.stripe.com/v3/"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
+    <script type="text/javascript">
+        const API_URL = 'https://www.bryanworx.com';
+
+        var stripe = Stripe('pk_test_51LuEURDlGWelEs72T4s5jVw6TCXeK7x17O8EOz7eblhAwVko1hILuqtRhcfBBqWDVsW2hXzrqqcpKSrW3fYiuapb00V2ctz4ip'); // Replace with your Stripe publishable key
+
+        var checkoutButton = document.getElementById('checkout-button');
+        var creditsInput = document.getElementById('credits-input');
+        var calculatedValue = document.getElementById('calculated-value');
+        var monitorButton = document.getElementById('monitor-button');
+        var burstButton = document.getElementById('burst-button');
+        var startMonitorButton = document.getElementById('start-monitor-button');
+        var stopMonitorButton = document.getElementById('stop-monitor-button');
+        var burstNumberInput = document.getElementById('burst-number');
+        var burstIntervalInput = document.getElementById('burst-interval');
+        var burstRequestsInput = document.getElementById('burst-requests');
+
+        const CREDIT_COST = 0.0005;  // cost per credit in USD
+        const MIN_CREDITS = 10000;   // minimum number of credits
+        let monitoringInterval;      // variable for monitoring interval
+        let burstTestInterval;       // variable for burst test interval
+        let isMonitoring = false;
+        let isBurstTestRunning = false;
+        let fetchProtectedButton = document.getElementById('fetch-protected-button');
+
+        checkoutButton.addEventListener('click', function () {
+            var credits = parseInt(creditsInput.value);
+            if (isNaN(credits) || credits < MIN_CREDITS) {
+                alert(`Minimum number of credits is ${MIN_CREDITS}`);
+                return;
+            }
+
+            fetch(`${API_URL}/create-checkout-session`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + localStorage.getItem('access_token')
+                },
+                body: JSON.stringify({ credits })
+            })
+            .then(function (response) {
+                return response.json();
+            })
+            .then(function (session) {
+                return stripe.redirectToCheckout({ sessionId: session.id });
+            })
+            .then(function (result) {
+                if (result.error) {
+                    console.error(result.error.message);
+                }
+            })
+            .catch(function (error) {
+                console.error('Error:', error);
+            });
+        });
+
+        async function fetchWithTimeout(resource, options = {}) {
+            const { timeout = 20000 } = options; // default timeout set to 20000ms (20 seconds)
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), timeout);
+            const response = await fetch(resource, {
+                ...options,
+                signal: controller.signal
+            });
+            clearTimeout(id);
+            return response;
+        }
+
+async function login() {
+    const username = prompt('Enter username:');
+
+    if (!username) {
+        alert('Username is required');
+        return;
+    }
+
+    try {
+        // Check if username exists
+        let response = await fetchWithTimeout(`${API_URL}/login`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ username }),
+            timeout: 20000
+        });
+
+        let errorData;
+        if (!response.ok) {
+            errorData = await response.json();
+            if (errorData.msg === 'Password is missing in request') {
+                // Username exists, prompt for the password
+                const password = prompt('Enter password:');
+
+                if (!password) {
+                    alert('Password is required');
+                    return;
+                }
+
+                // Now send the username and password
+                response = await fetchWithTimeout(`${API_URL}/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ username, password }),
+                    timeout: 20000
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    localStorage.setItem('access_token', data.access_token);
+                    localStorage.setItem('refresh_token', data.refresh_token); // Use localStorage for testing
+                    console.log('Login successful:', data);
+                    updateCredits(data.credits);
+                } else {
+                    errorData = await response.json();
+                    console.error('Login failed:', errorData);
+                    alert(`Login failed: ${errorData.msg}`);
+                }
+            } else {
+                console.error('Login failed:', errorData);
+                alert(`Login failed: ${errorData.msg}`);
+            }
+        }
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            console.error('Login request timed out');
+        } else {
+            console.error('Login request failed:', error);
+        }
+    }
+}
+
+
+        async function fetchCredits() {
+            let accessToken = localStorage.getItem('access_token');
+            if (!accessToken) {
+                console.error('No access token available');
+                return;
+            }
+
+            try {
+                const response = await fetchWithTimeout(`${API_URL}/credits`, {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${accessToken}`
+                    },
+                    timeout: 20000
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    updateCredits(data.credits);
+                } else if (response.status === 429) {
+                    const retryAfter = response.headers.get('Retry-After') || 60;
+                    console.error(`Rate limit exceeded. Retry after ${retryAfter} seconds.`);
+                    setTimeout(fetchCredits, retryAfter * 1000); // Retry after the specified time
+                } else {
+                    console.error('Failed to fetch credits:', await response.json());
+                }
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.error('Fetch credits request timed out');
+                } else {
+                    console.error('Error fetching credits:', error);
+                }
+            }
+        }
+
+        function updateCredits(credits) {
+            const creditsElement = document.getElementById('credits');
+            creditsElement.textContent = `Credits: ${credits}`;
+        }
+
+        async function fetchProtectedResource() {
+            let accessToken = localStorage.getItem('access_token');
+            if (!accessToken) {
+                console.error('No access token available');
+                alert('No access token available. Please login first.');
+                return;
+            }
+
+            try {
+                const response = await fetchWithTimeout(`${API_URL}/api`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${accessToken}`
+                    },
+                    body: JSON.stringify({ key: 'value' }),
+                    timeout: 20000
+                });
+
+                if (response.status === 401) {
+                    console.log('Access token expired, attempting to refresh...');
+                    accessToken = await refreshAccessToken();
+                    if (accessToken) {
+                        const retryResponse = await fetchWithTimeout(`${API_URL}/api`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${accessToken}`
+                            },
+                            body: JSON.stringify({ key: 'value' }),
+                            timeout: 20000
+                        });
+
+                        if (retryResponse.ok) {
+                            console.log('Protected resource data:', await retryResponse.json());
+                            fetchCredits();
+                        } else {
+                            console.error('Failed to fetch protected resource after refresh:', await retryResponse.json());
+                            alert('Failed to fetch protected resource after refresh');
+                        }
+                    } else {
+                        alert('Failed to refresh access token. Please login again.');
+                    }
+                } else if (response.status === 402) {
+                    alert('Insufficient credits');
+                } else if (response.status === 429) {
+                    const retryAfter = response.headers.get('Retry-After') || 60; // Default to 60 seconds if not specified
+                    console.error(`Rate limit exceeded. Retry after ${retryAfter} seconds.`);
+                    alert(`Rate limit exceeded. Retry after ${retryAfter} seconds.`);
+                    setTimeout(fetchProtectedResource, retryAfter * 1000); // Retry after the specified time
+                } else if (response.ok) {
+                    console.log('Protected resource data:', await response.json());
+                    fetchCredits();
+                } else {
+                    const errorData = await response.json();
+                    console.error('Failed to fetch protected resource:', errorData);
+                    alert('Failed to fetch protected resource');
+                }
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.error('Fetch protected resource request timed out');
+                } else {
+                    console.error('Error fetching protected resource:', error);
+                }
+                alert('Error fetching protected resource');
+            }
+        }
+
+        async function refreshAccessToken() {
+            let refreshToken = localStorage.getItem('refresh_token');
+            if (!refreshToken) {
+                console.error('No refresh token available');
+                alert('No refresh token available. Please login first.');
+                return null;
+            }
+
+            try {
+                const response = await fetchWithTimeout(`${API_URL}/refresh`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${refreshToken}`
+                    },
+                    timeout: 20000
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    localStorage.setItem('access_token', data.access_token);
+                    console.log('Token refreshed successfully:', data);
+                    return data.access_token;
+                } else {
+                    const errorData = await response.json();
+                    console.error('Failed to refresh access token:', errorData);
+                    localStorage.removeItem('access_token');
+                    localStorage.removeItem('refresh_token');
+                    alert('Failed to refresh access token. Please login again.');
+                    return null;
+                }
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.error('Refresh access token request timed out');
+                } else {
+                    console.error('Error refreshing access token:', error);
+                }
+                localStorage.removeItem('access_token');
+                localStorage.removeItem('refresh_token');
+                alert('Error refreshing access token. Please login again.');
+                return null;
+            }
+        }
+
+async function logout() {
+    let accessToken = localStorage.getItem('access_token');
+    let refreshToken = localStorage.getItem('refresh_token');
+
+    try {
+        const response = await fetchWithTimeout(`${API_URL}/logout`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify({ refresh_token: refreshToken }),
+            timeout: 20000
+        });
+
+        if (response.ok) {
+            console.log('Logged out successfully');
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('refresh_token');
+            alert('Logged out successfully');
+        } else {
+            const errorData = await response.json();
+            console.error('Failed to logout:', errorData);
+            if (response.status === 401) {
+                alert('Unauthorized. Please log in again.');
+                // Optionally, redirect the user to the login page
+                window.location.href = '/login';
+            } else {
+                alert('Failed to logout');
+            }
+        }
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            console.error('Logout request timed out');
+        } else {
+            console.error('Error during logout:', error);
+        }
+        alert('Error during logout');
+    }
+}
+
+
+        async function revokeTokens() {
+            const username = prompt('Enter username to revoke tokens for:');
+            let accessToken = localStorage.getItem('access_token');
+            if (!accessToken) {
+                console.error('No access token available');
+                alert('No access token available. Please login first.');
+                return;
+            }
+
+            try {
+                const response = await fetchWithTimeout(`${API_URL}/revoke`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${accessToken}`
+                    },
+                    body: JSON.stringify({ username }),
+                    timeout: 20000
+                });
+
+                if (response.ok) {
+                    console.log('Tokens revoked successfully');
+                    alert('Tokens revoked successfully');
+                    // Remove the tokens from local storage
+                    localStorage.removeItem('access_token');
+                    localStorage.removeItem('refresh_token');
+                } else {
+                    const errorData = await response.json();
+                    console.error('Failed to revoke tokens:', errorData);
+                    alert('Failed to revoke tokens');
+                }
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.error('Revoke tokens request timed out');
+                } else {
+                    console.error('Error during token revocation:', error);
+                }
+                alert('Error during token revocation');
+            }
+        }
+
+        async function debugTokens() {
+            try {
+                const response = await fetchWithTimeout(`${API_URL}/debug/tokens`, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: 20000
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log('Tokens:', data);
+                } else {
+                    const errorData = await response.json();
+                    console.error('Failed to fetch tokens:', errorData);
+                    alert('Failed to fetch tokens');
+                }
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.error('Debug tokens request timed out');
+                } else {
+                    console.error('Error fetching tokens:', error);
+                }
+                alert('Error fetching tokens');
+            }
+        }
+
+        async function fetchCpuUsage() {
+            let accessToken = localStorage.getItem('access_token');
+            if (!accessToken) {
+                console.error('No access token available');
+                alert('No access token available. Please login first.');
+                return;
+            }
+
+            try {
+                const response = await fetchWithTimeout(`${API_URL}/cpu-usage`, {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${accessToken}`
+                    },
+                    timeout: 20000
+                });
+
+                if (response.status === 401) {
+                    console.log('Access token expired, attempting to refresh...');
+                    accessToken = await refreshAccessToken();
+                    if (accessToken) {
+                        const retryResponse = await fetchWithTimeout(`${API_URL}/cpu-usage`, {
+                            method: 'GET',
+                            headers: {
+                                'Authorization': `Bearer ${accessToken}`
+                            },
+                            timeout: 20000
+                        });
+
+                        if (retryResponse.ok) {
+                            const data = await retryResponse.json();
+                            console.log('CPU usage data:', data);
+                            updateCpuGraph(data);
+                        } else {
+                            const errorData = await retryResponse.json();
+                            console.error('Failed to fetch CPU usage after refresh:', errorData);
+                            alert('Failed to fetch CPU usage after refresh');
+                        }
+                    } else {
+                        alert('Failed to refresh access token. Please login again.');
+                    }
+                } else if (response.ok) {
+                    const data = await response.json();
+                    console.log('CPU usage data:', data);
+                    updateCpuGraph(data);
+                } else {
+                    const errorData = await response.json();
+                    console.error('Failed to fetch CPU usage:', errorData);
+                    alert('Failed to fetch CPU usage');
+                }
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.error('Fetch CPU usage request timed out');
+                } else {
+                    console.error('Error fetching CPU usage:', error);
+                }
+                alert('Error fetching CPU usage');
+            }
+        }
+
+        async function fetchFileStorageUsage() {
+            let accessToken = localStorage.getItem('access_token');
+            if (!accessToken) {
+                console.error('No access token available');
+                alert('No access token available. Please login first.');
+                return;
+            }
+
+            try {
+                const response = await fetchWithTimeout(`${API_URL}/file-storage-usage`, {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${accessToken}`
+                    },
+                    timeout: 20000
+                });
+
+                if (response.status === 401) {
+                    console.log('Access token expired, attempting to refresh...');
+                    accessToken = await refreshAccessToken();
+                    if (accessToken) {
+                        const retryResponse = await fetchWithTimeout(`${API_URL}/file-storage-usage`, {
+                            method: 'GET',
+                            headers: {
+                                'Authorization': `Bearer ${accessToken}`
+                            },
+                            timeout: 20000
+                        });
+
+                        if (retryResponse.ok) {
+                            const data = await retryResponse.json();
+                            console.log('File storage usage data:', data);
+                            updateFileStorageGraph(data);
+                        } else {
+                            const errorData = await retryResponse.json();
+                            console.error('Failed to fetch file storage usage after refresh:', errorData);
+                            alert('Failed to fetch file storage usage after refresh');
+                        }
+                    } else {
+                        alert('Failed to refresh access token. Please login again.');
+                    }
+                } else if (response.ok) {
+                    const data = await response.json();
+                    console.log('File storage usage data:', data);
+                    updateFileStorageGraph(data);
+                } else {
+                    const errorData = await response.json();
+                    console.error('Failed to fetch file storage usage:', errorData);
+                    alert('Failed to fetch file storage usage');
+                }
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.error('Fetch file storage usage request timed out');
+                } else {
+                    console.error('Error fetching file storage usage:', error);
+                }
+                alert('Error fetching file storage usage');
+            }
+        }
+
+        function toggleMonitoring() {
+            if (isMonitoring) {
+                clearInterval(monitoringInterval);
+                isMonitoring = false;
+                monitorButton.textContent = 'Start Monitoring';
+                console.log('Monitoring stopped.');
+            } else {
+                const interval = parseInt(document.getElementById('interval-input').value);
+                if (isNaN(interval) || interval <= 0) {
+                    alert('Please enter a valid interval in minutes.');
+                    return;
+                }
+
+                fetchCpuUsage();  // Fetch data immediately
+                fetchFileStorageUsage();  // Fetch file storage data immediately
+                monitoringInterval = setInterval(() => {
+                    fetchCpuUsage();
+                    fetchFileStorageUsage();
+                }, interval * 60 * 1000);
+                isMonitoring = true;
+                monitorButton.textContent = 'Stop Monitoring';
+                console.log('Monitoring started.');
+            }
+        }
+
+        async function burstRequest() {
+            let accessToken = localStorage.getItem('access_token');
+            if (!accessToken) {
+                console.error('No access token available');
+                alert('No access token available. Please login first.');
+                return;
+            }
+
+            try {
+                const response = await fetchWithTimeout(`${API_URL}/api`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${accessToken}`
+                    },
+                    body: JSON.stringify({ key: 'value' }),
+                    timeout: 20000
+                });
+
+                if (response.status === 401) {
+                    console.log('Access token expired, attempting to refresh...');
+                    accessToken = await refreshAccessToken();
+                    if (accessToken) {
+                        const retryResponse = await fetchWithTimeout(`${API_URL}/api`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${accessToken}`
+                            },
+                            body: JSON.stringify({ key: 'value' }),
+                            timeout: 20000
+                        });
+
+                        if (retryResponse.ok) {
+                            console.log('Protected resource data:', await retryResponse.json());
+                            return { success: true };
+                        } else {
+                            console.error('Failed to fetch protected resource after refresh:', await retryResponse.json());
+                            return { success: false, retryAfter: 60 };
+                        }
+                    } else {
+                        alert('Failed to refresh access token. Please login again.');
+                        return { success: false, retryAfter: 60 };
+                    }
+                } else if (response.status === 402) {
+                    alert('Insufficient credits');
+                    return { success: false, retryAfter: 60 };
+                } else if (response.status === 429) {
+                    const retryAfter = response.headers.get('Retry-After') || 60; // Default to 60 seconds if not specified
+                    console.error(`Rate limit exceeded. Retry after ${retryAfter} seconds.`);
+                    return { success: false, retryAfter };
+                } else if (response.ok) {
+                    console.log('Protected resource data:', await response.json());
+                    return { success: true };
+                } else {
+                    const errorData = await response.json();
+                    console.error('Failed to fetch protected resource:', errorData);
+                    return { success: false, retryAfter: 60 };
+                }
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.error('Burst request timed out');
+                } else {
+                    console.error('Error during burst request:', error);
+                }
+                return { success: false, retryAfter: 60 };
+            }
+        }
+
+        async function burstTest() {
+            const numberOfBursts = parseInt(burstNumberInput.value);
+            const intervalBetweenBursts = parseInt(burstIntervalInput.value);
+            const requestsPerBurst = parseInt(burstRequestsInput.value);
+
+            for (let burstCount = 0; burstCount < numberOfBursts; burstCount++) {
+                if (!isBurstTestRunning) {
+                    console.log('Burst test stopped.');
+                    break;
+                }
+
+                let burstPromises = [];
+                for (let requestCount = 0; requestCount < requestsPerBurst; requestCount++) {
+                    burstPromises.push(burstRequest());
+                }
+
+                const burstResults = await Promise.all(burstPromises);
+                const retryAfter = burstResults.reduce((max, result) => Math.max(max, result.retryAfter || 0), 0);
+
+                if (retryAfter > 0) {
+                    console.log(`Burst test waiting for ${retryAfter} seconds.`);
+                    await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+                } else {
+                    await new Promise(resolve => setTimeout(resolve, intervalBetweenBursts * 1000));
+                }
+
+                if (burstCount % 2 === 0) {
+                    fetchCredits(); // Update credits every 2 bursts
+                }
+            }
+
+            console.log('Burst test completed.');
+            isBurstTestRunning = false;
+            burstButton.textContent = 'Start Burst Test';
+            fetchProtectedButton.disabled = false;
+        }
+
+        function toggleBurstTest() {
+            if (isBurstTestRunning) {
+                isBurstTestRunning = false;
+                burstButton.textContent = 'Start Burst Test';
+                fetchProtectedButton.disabled = false;
+                console.log('Burst test stopped.');
+            } else {
+                isBurstTestRunning = true;
+                burstButton.textContent = 'Stop Burst Test';
+                fetchProtectedButton.disabled = true;
+                burstTest();
+            }
+        }
+
+async function testDatabaseThroughput() {
+    const count = document.getElementById('throughput-count').value || 100;
+    const resultElement = document.getElementById('throughput-result');
+    resultElement.textContent = 'Testing...';
+
+    try {
+        const response = await fetch(`${API_URL}/test-throughput`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+            },
+            body: JSON.stringify({ count })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            resultElement.textContent = `Throughput: ${Math.floor(data.throughput)} requests/second`;
+        } else {
+            const errorData = await response.json();
+            resultElement.textContent = `Error: ${errorData.msg}`;
+        }
+    } catch (error) {
+        console.error('Error testing throughput:', error);
+        resultElement.textContent = 'Error testing throughput';
+    }
+}
+
+        function updateLimitsAndUsage() {
+            document.getElementById('limits').textContent = `Rate Limits: API - 1000/min, Client - 10000/day, Max 5000/hour`;
+            fetchCpuUsage();
+            fetchFileStorageUsage();
+        }
+
+        // Initialize the usage graph
+        const ctx = document.getElementById('usage-graph').getContext('2d');
+        const usageChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'CPU Used (%)',
+                        data: [],
+                        borderColor: 'rgba(255, 99, 132, 1)',
+                        backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                        fill: false
+                    },
+                    {
+                        label: 'File Storage Used (%)',
+                        data: [],
+                        borderColor: 'rgba(54, 162, 235, 1)',
+                        backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                        fill: false
+                    }
+                ]
+            },
+            options: {
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: {
+                            unit: 'minute'
+                        }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            callback: function(value) {
+                                return value.toFixed(1) + '%';
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        function updateCpuGraph(data) {
+            const now = new Date();
+            const cpuUsedPercentage = (data.daily_cpu_total_usage_seconds / data.daily_cpu_limit_seconds) * 100;
+            usageChart.data.labels.push(now);
+            usageChart.data.datasets[0].data.push(cpuUsedPercentage);
+            updateMaxYScale(cpuUsedPercentage);
+            usageChart.update();
+        }
+
+        function updateFileStorageGraph(data) {
+            const now = new Date();
+            const fileStorageUsedPercentage = (data.file_storage_used_bytes / data.file_storage_limit_bytes) * 100;
+            usageChart.data.labels.push(now);
+            usageChart.data.datasets[1].data.push(fileStorageUsedPercentage);
+            updateMaxYScale(fileStorageUsedPercentage);
+            usageChart.update();
+        }
+
+        function updateMaxYScale(newValue) {
+            const currentMax = usageChart.options.scales.y.max;
+            const newMax = Math.max(currentMax, newValue * 2);
+            if (newMax !== currentMax) {
+                usageChart.options.scales.y.max = newMax;
+            }
+        }
+
+        updateLimitsAndUsage();
+    </script>
+</body>
+</html>

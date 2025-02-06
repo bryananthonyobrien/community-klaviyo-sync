@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Panel</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f8f8f8;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            justify-content: center;
+        }
+        .container, .api-container, .section {
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Buy API Access</h1>
+        <p>Credit costs: 0.0005 cents USD per credit</p>
+        <p>Minimum bundle: 10,000 credits</p>
+        <input type="number" id="credits-input" placeholder="Enter number of credits (min 10,000)">
+        <button id="checkout-button">Checkout</button>
+        <p id="calculated-value"></p>
+    </div>
+    <div class="api-container">
+        <h1>API Client Test</h1>
+        <button onclick="fetchProtectedResource()" id="fetch-protected-button">Fetch Protected Resource</button>
+        <button onclick="refreshAccessToken()">Refresh Access Token</button>
+        <button onclick="logout()">Logout</button>
+        <button onclick="revokeTokens()">Revoke Tokens</button>
+        <button onclick="fetchProtectedResourceWithRefreshToken()">Fetch with Refresh Token</button>
+        <div id="credits-container"></div> <!-- Container for displaying credits and cache status -->
+        <div id="status-container"></div> <!-- Container for displaying user status -->
+        <div id="api-calls-container"></div> <!-- Container for displaying API call counts -->
+        <div id="cache-status"></div> <!-- Display cache status here -->
+        <div id="limits"></div>
+        <div id="usage"></div>
+        <div id="usage-graph-container">
+            <canvas id="usage-graph"></canvas>
+        </div>
+        <div class="section">
+            <h2>Monitoring</h2>
+            <input type="number" id="interval-input" placeholder="Enter interval in minutes">
+            <button id="monitor-button" onclick="toggleMonitoring()">Start Monitoring</button>
+        </div>
+        <div class="section">
+            <h2>Burst Test</h2>
+            <label for="burst-number">Number of bursts:</label>
+            <input type="number" id="burst-number" placeholder="10">
+            <label for="burst-interval">Interval between bursts (seconds):</label>
+            <input type="number" id="burst-interval" placeholder="1">
+            <label for="burst-requests">Requests per burst:</label>
+            <input type="number" id="burst-requests" placeholder="10">
+            <button id="burst-button" onclick="toggleBurstTest()">Start Burst Test</button>
+        </div>
+        <div class="section">
+            <h2>Database Throughput Test</h2>
+            <label for="throughput-count">Number of Requests:</label>
+            <input type="number" id="throughput-count" placeholder="100">
+            <button onclick="testDatabaseThroughput()">Test Throughput</button>
+            <div id="throughput-result"></div>
+        </div>
+    </div>
+    <script src="https://js.stripe.com/v3/"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
+        <script type="module" src="/static/scripts.js"></script>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            initializeStripe();
+            addCheckoutEventListener();
+            fetchCreditsAndUpdateUI(); // Fetch credits and update UI on load
+            logLocalStorage();
+        });
+    </script>
+
+    <script type="module">
+    import { logout } from '/static/logout.js';
+    </script>
+
+
+</body>
+</html>
