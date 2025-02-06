@@ -3659,5 +3659,4 @@ def status():
         return jsonify({"status": "ok", "message": "The server is running and available."}), 200
 
 if __name__ == '__main__':
-
-    app.run()
+    app.run(host="0.0.0.0", port=5000)
