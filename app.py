@@ -192,8 +192,8 @@ def login_required(f):
 
 @app.route('/')
 def index():
-    # Only redirect to www.bryanworx.com if not on localhost
-    if request.host == 'bryanworx.com' and not request.host.startswith('localhost') and not request.host.startswith('127.0.0.1'):
+    # Only redirect if accessed via the non-www version
+    if request.host == 'bryanworx.com':
         return redirect('https://www.bryanworx.com', code=301)
     return render_template('login.html')
     
