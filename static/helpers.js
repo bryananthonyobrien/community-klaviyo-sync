@@ -1,4 +1,9 @@
-export const API_URL = 'https://www.bryanworx.com';
+const API_URL = window.NODE_ENV === 'production' 
+  ? 'https://www.bryanworx.com' 
+  : 'http://localhost:5050';
+export { API_URL };  // Ensure this export is correct
+
+console.log(API_URL); // Will log the appropriate URL based on NODE_ENV
 
 // Updated fetchWithTimeout function with token refresh handling
 export async function fetchWithTimeout(resource, options = {}) {
