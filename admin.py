@@ -36,7 +36,6 @@ from redis import Redis, exceptions as redis_exceptions
 import sys
 sys.path.append('/home/bryananthonyobrien/mysite')
 from cache import export_community_payloads_to_json, delete_community_payloads, view_community_payloads, create_stage_csv_files, get_redis_client, initialize_cache, print_cache_contents, remove_user_from_cache, initialize_user_cache, suspend_user_cache, unsuspend_user_cache, update_user_credits_in_cache
-from klaviyo import clear_discover_klaviyo_status, display_klaviyo_status
 
 
 # Load environment variables from .env file
@@ -1328,10 +1327,8 @@ def interactive_help():
                 print("Operation canceled.")
         elif choice == 24:
             username = input("Enter username to reset Klaviyo status: ")
-            clear_discover_klaviyo_status(username)
         elif choice == 25:
             username = input("Enter username to display Klaviyo status: ")
-            display_klaviyo_status(username)
         elif choice == 26:
             username = input("Enter username to display discoveries records: ")
             display_discoveries_records(username)
@@ -1427,9 +1424,9 @@ if __name__ == "__main__":
         print(f"Export complete. Payloads exported: {export_result['num_payloads']}")
         print(f"File location: {export_result['file_path']}")
     elif args.clear_discover_klaviyo_status:
-        clear_discover_klaviyo_status(args.clear_discover_klaviyo_status)
+        print("Coming soon")
     elif args.display_klaviyo_status:
-        display_klaviyo_status(args.display_klaviyo_status)
+        print("Coming soon")
     elif args.init_tables:
         initialize_tables()
     elif args.add_user:

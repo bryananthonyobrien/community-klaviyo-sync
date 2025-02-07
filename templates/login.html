@@ -42,6 +42,9 @@
         <h1>Login</h1>
         <button id="login-button">Login</button>
     </div>
-<script type="module" src="/static/login.js"></script>
+    <script>
+       window.NODE_ENV = 'development';  // or 'production'
+    </script>
+    <script type="module" src="/static/login.js"></script>
 </body>
 </html>

@@ -60,7 +60,8 @@ load_dotenv(dotenv_path)
 app = Flask(__name__, static_url_path='/static', static_folder='static', template_folder='templates')
 
 # Enable CORS for all routes
-CORS(app, resources={r"/*": {"origins": "*"}}, methods=["GET", "POST", "DELETE", "PUT"])
+# CORS(app, resources={r"/*": {"origins": "*"}}, methods=["GET", "POST", "DELETE", "PUT"])
+CORS(app, resources={r"/*": {"origins": ["https://www.bryanworx.com", "http://localhost:5050"]}}, methods=["GET", "POST", "DELETE", "PUT"])
 
 is_loading_clients = True
 
@@ -193,8 +194,8 @@ def login_required(f):
 @app.route('/')
 def index():
     # Only redirect if accessed via the non-www version
-    if request.host == 'bryanworx.com':
-        return redirect('https://www.bryanworx.com', code=301)
+    # if request.host == 'bryanworx.com':
+    #    return redirect('https://www.bryanworx.com', code=301)
     return render_template('login.html')
     
 @app.route('/success', methods=['GET'])
@@ -3621,8 +3622,12 @@ def handle_exception(e):
     app_logger.error(traceback.format_exc())
     return jsonify({"error": "Internal Server Error"}), 500
 
-sslify = SSLify(app)
-app_logger.info("Created SSLify")
+# Disable SSLify for local development
+if os.getenv('FLASK_ENV') == 'production':
+    sslify = SSLify(app)
+    app_logger.info("Created SSLify")
+else:
+    app_logger.info("SSLify not enabled for local development")
 
 @app.after_request
 def add_security_headers(response):

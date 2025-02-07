@@ -14,7 +14,7 @@ export async function downloadMembersNotInKlaviyo() {
 
     // Check if the path exists
     if (!stage2Path) {
-        alert('Failed to retrieve the file path for members not in Klayvio.');
+        console.log("Failed to retrieve the file path for members not in Klayvio.");
         return;
     }
 
@@ -508,7 +508,7 @@ function getMemberIdsByStateAndStatus(state, status) {
   async function fetchFailedProfiles() {
     const csvFilePath = localStorage.getItem("stage1DroppedPath");
     if (!csvFilePath) {
-      alert("Failed to retrieve the file path for the failed profiles.");
+      console.log("Failed to retrieve the file path for the failed profiles.");
       return;
     }
 
@@ -541,7 +541,7 @@ function getMemberIdsByStateAndStatus(state, status) {
   async function fetchPassedProfiles() {
     const csvFilePath = localStorage.getItem("stage1Path");
     if (!csvFilePath) {
-      alert("Failed to retrieve the file path for the failed profiles.");
+      console.log("Failed to retrieve the file path for the failed profiles.");
       return;
     }
 
