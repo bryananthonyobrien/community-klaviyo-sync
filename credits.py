@@ -67,7 +67,7 @@ def deduct_credits_for_usage(username):
         app_logger.error(f"Error deducting credits for user {username}: {str(e)}")
         return False
 
-def create_checkout_session_function():
+def create_checkout_session_function_old():
     try:
         username = get_jwt_identity()
         data = request.get_json()
@@ -105,6 +105,52 @@ def create_checkout_session_function():
         app_logger.error(traceback.format_exc())  # Add traceback for detailed error logging
         return jsonify(error=str(e)), 403
 
+def create_checkout_session_function():
+    try:
+        username = get_jwt_identity()
+        data = request.get_json()
+        credits = data.get('credits', 0)
+
+        if credits < 10000:
+            return jsonify({'error': 'Minimum number of credits is 10,000'}), 400
+
+        amount = credits * 0.0005  # Calculate the payment amount in USD
+        amount_cents = int(amount * 100)  # Stripe requires the amount in cents
+
+        app_logger.debug(f'Creating checkout session for user: {username} for {credits} credits')
+
+        # Determine success and cancel URLs based on the environment
+        if os.getenv('FLASK_ENV') == 'production':
+            success_url = f'https://www.bryanworx.com/success?session_id={{CHECKOUT_SESSION_ID}}&username={username}'
+            cancel_url = 'https://www.bryanworx.com/cancel'
+        else:
+            success_url = f'http://localhost:5050/success?session_id={{CHECKOUT_SESSION_ID}}&username={username}'  # Dev URL
+            cancel_url = 'http://localhost:5050/cancel'  # Dev URL
+
+        session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{
+                'price_data': {
+                    'currency': 'usd',
+                    'product_data': {
+                        'name': f'{credits} API Credits',
+                    },
+                    'unit_amount': amount_cents,
+                },
+                'quantity': 1,
+            }],
+            mode='payment',
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={'username': username, 'credits': credits}
+        )
+
+        app_logger.info(f'Checkout session created for user: {username} with session ID: {session.id}')
+        return jsonify({'id': session.id})
+    except Exception as e:
+        app_logger.error(f"Error creating checkout session: {str(e)}")
+        app_logger.error(traceback.format_exc())  # Add traceback for detailed error logging
+        return jsonify(error=str(e)), 403
 
 def stripe_webhook_function():
     payload = request.get_data(as_text=True)
@@ -205,9 +251,6 @@ def stripe_webhook_function():
 
     return jsonify({'status': 'success'}), 200
 
-
-
-
 def revoke_all_tokens_for_user(username):
     try:
         with get_db_connection() as conn:
@@ -273,6 +316,18 @@ def create_tokens(username, role, daily_limit, hourly_limit, minute_limit, secre
 def cancel_payment_function():
     return render_template('cancel.html', message="Payment was cancelled. Please try again.")
 
+def payment_success_function_old():
+    try:
+        app_logger.info("Accessed the success route")
+        username = request.args.get('username')
+        session_id = request.args.get('session_id')
+        app_logger.info(f"Username from query parameters: {username}")
+        app_logger.info(f"Session ID from query parameters: {session_id}")
+        return render_template('success.html', username=username, session_id=session_id)
+    except Exception as e:
+        app_logger.error(f"Error in payment success: {str(e)}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
 def payment_success_function():
     try:
         app_logger.info("Accessed the success route")
@@ -280,6 +335,38 @@ def payment_success_function():
         session_id = request.args.get('session_id')
         app_logger.info(f"Username from query parameters: {username}")
         app_logger.info(f"Session ID from query parameters: {session_id}")
+
+        # Retrieve the Checkout Session from Stripe using session_id
+        session = stripe.checkout.Session.retrieve(session_id)
+        app_logger.debug(f'Session object: {session}')
+
+        # Extract credits and username directly from session metadata
+        credits = int(session.metadata.get('credits', 0))  # Fetch credits from the session metadata
+        app_logger.debug(f'Credits from session metadata: {credits}')
+        
+        # Update the credits for the user in the database
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT credits FROM users WHERE username = ?", (username,))
+            current_credits = cursor.fetchone()[0]
+            new_credits = current_credits + credits  # Add the purchased credits
+
+            cursor.execute("UPDATE users SET credits = ? WHERE username = ?", (new_credits, username))
+            conn.commit()
+
+            app_logger.info(f"Updated credits for user {username}. New balance: {new_credits}")
+
+        # Optionally, log the credit change to the `credit_changes` table
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO credit_changes (user_id, amount, source, transaction_id, change_date)
+                VALUES (?, ?, ?, ?, ?)
+            """, (username, credits, "payment", session_id, datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')))
+            conn.commit()
+
+            app_logger.info(f"Logged credit change for user {username}: {credits} credits added.")
+
         return render_template('success.html', username=username, session_id=session_id)
     except Exception as e:
         app_logger.error(f"Error in payment success: {str(e)}")
