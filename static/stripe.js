@@ -17,5 +17,3 @@ export function initializeStripe() {
         console.error('Stripe.js not loaded');
     }
 }
-
-
