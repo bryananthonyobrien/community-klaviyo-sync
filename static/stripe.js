@@ -1,9 +1,18 @@
 export let stripe;
 
 export function initializeStripe() {
+    // Retrieve the Stripe Publishable Key from the input field
+    const stripePublishableKey = document.getElementById('stripe-publishable-key-input').value;
+
+    if (!stripePublishableKey) {
+        console.error("Stripe Publishable Key is not set.");
+        return;
+    }
+
     if (typeof Stripe !== 'undefined') {
-        stripe = Stripe('pk_test_51LuEURDlGWelEs72T4s5jVw6TCXeK7x17O8EOz7eblhAwVko1hILuqtRhcfBBqWDVsW2hXzrqqcpKSrW3fYiuapb00V2ctz4ip'); // Replace with your Stripe publishable key
-        console.log('Initialised Stripe');
+        // Initialize Stripe with the dynamic publishable key
+        stripe = Stripe(stripePublishableKey); 
+        console.log('Stripe initialized with the key:', stripePublishableKey);
     } else {
         console.error('Stripe.js not loaded');
     }

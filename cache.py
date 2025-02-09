@@ -111,8 +111,6 @@ def export_community_payloads_to_json(username):
         app_logger.error(f"Error exporting community payloads to JSON: {str(e)}")
         return json.dumps({"file_path": None, "payload_count": 0})
 
-
-
 def view_community_payloads(limit=10):
     """
     Fetch and return the first 'limit' community_payload_* entries from Redis.
@@ -1085,7 +1083,6 @@ def print_cache_contents():
     except Exception as e:
         print(f"Error displaying cache contents: {str(e)}")
 
-
 def load_profiles_into_redis(profiles, base_redis_key, username):
     """
     Load profiles into Redis in chunks of 1000 under keys with an index suffix.
@@ -1759,8 +1756,6 @@ def create_stage_csv_files(username, silent=False):
         print(f"Redis connection error: {str(e)}")
     except Exception as e:
         print(f"Error processing profiles: {str(e)}")
-
-
 
 def sync_credits_to_db(username, source="usage sync triggered by insufficient credit"):
     try:

@@ -21,7 +21,7 @@ import threading
 import traceback
 from flask_limiter.errors import RateLimitExceeded
 from functools import wraps
-from klaviyo import get_klaviyo_profile_count, do_klaviyo_discovery, get_redis_client
+from klaviyo import do_klaviyo_discovery, get_redis_client
 from community import Community_subscription_create, create_sub_community_tag
 import json
 import zipfile
@@ -775,29 +775,6 @@ def create_checkout_session():
 @app.route('/webhook', methods=['POST'])
 def stripe_webhook():
     return stripe_webhook_function()
-
-def get_credits_to_deduct(payload):
-    # Default deduction amount
-    credits_to_deduct = 1
-
-    # Log the incoming payload
-    app_logger.debug(f"Received payload: {payload}")
-
-    # Check for the 'usecase' tag in the payload
-    usecase = payload.get('usecase', '').lower()
-    app_logger.debug(f"Usecase identified: {usecase}")
-
-    if usecase == 'sync':
-        # Call the Klaviyo function to get the number of profiles matching the criteria
-        phone_number = "+18329908088"
-        app_logger.debug(f"Calling get_klaviyo_profile_count for phone number: {phone_number}")
-        credits_to_deduct = get_klaviyo_profile_count(phone_number)
-        app_logger.debug(f"Klaviyo profile count returned: {credits_to_deduct}")
-
-    # Log the final credits to deduct
-    app_logger.debug(f"Final credits to deduct: {credits_to_deduct}")
-
-    return credits_to_deduct
 
 import csv
 
@@ -2114,8 +2091,29 @@ def klaviyo_status():
         app_logger.error(f"Error fetching Klaviyo status for user {username}: {str(e)}")
         return jsonify({"error": "Failed to retrieve Klaviyo status"}), 500
 
+@app.route('/set_stripe_publishable_key', methods=['POST'])
+@jwt_required()
+def set_stripe_publishable_key():
+    username = get_jwt_identity()
+    app_logger.info(f"Received request to set Stripe Publishable Key for user: {username}")
 
+    try:
+        redis_client = get_redis_client()
+        data = request.get_json()
+        stripe_publishable_key = data.get('stripe_publishable_key')
 
+        if not stripe_publishable_key:
+            return jsonify({"error": "Invalid Stripe Publishable Key value. Must be a non-empty string."}), 400
+
+        config_key = f"configuration_{username}"
+        redis_client.hset(config_key, 'STRIPE_PUBLISHABLE_KEY', stripe_publishable_key)
+
+        app_logger.info(f"STRIPE_PUBLISHABLE_KEY for {username} set successfully.")
+        return jsonify({"message": "Stripe Publishable Key updated successfully"}), 200
+
+    except Exception as e:
+        app_logger.error(f"Error setting Stripe Publishable Key for user {username}: {str(e)}")
+        return jsonify({"error": "Failed to update Stripe Publishable Key"}), 500
 
 @app.route('/set_klaviyo_read_profile_api_key', methods=['POST'])
 @jwt_required()
@@ -2299,6 +2297,7 @@ def get_configuration():
         community_api_token = redis_client.hget(config_key, 'COMMUNITY_API_TOKEN') or ''
         max_workers = redis_client.hget(config_key, 'max_community_workers') or ''
         sub_community = redis_client.hget(config_key, 'SUB_COMMUNITY') or ''
+        stripe_publishable_key = redis_client.hget(config_key, 'STRIPE_PUBLISHABLE_KEY') or ''  # Add Stripe Publishable Key
 
         # Return the configuration values as JSON
         return jsonify({
@@ -2306,12 +2305,14 @@ def get_configuration():
             "community_client_id": community_client_id.decode('utf-8') if community_client_id else '',
             "community_api_token": community_api_token.decode('utf-8') if community_api_token else '',
             "max_workers": int(max_workers) if max_workers else '',
-            "sub_community": sub_community.decode('utf-8') if sub_community else ''
+            "sub_community": sub_community.decode('utf-8') if sub_community else '',
+            "stripe_publishable_key": stripe_publishable_key.decode('utf-8') if stripe_publishable_key else ''  # Add Stripe Publishable Key to the response
         }), 200
 
     except Exception as e:
         app_logger.error(f"Error fetching configuration for user {username}: {str(e)}")
         return jsonify({"error": "Failed to retrieve configuration"}), 500
+
 
 @app.route('/download_directory', methods=['GET'])
 @jwt_required()

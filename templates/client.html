@@ -662,6 +662,12 @@
           <input type="text" id="sub-community-input" placeholder="Enter Sub Community" style="margin-right: 10px;">
           <button onclick="setSubCommunity()" style="padding: 5px 10px;">Set Sub Community</button>
         </div>
+        <!-- tripe Publishable Key Section -->
+        <div style="display: flex; align-items: center;">
+          <label for="stripe-publishable-key-input" style="margin-right: 10px;">Stripe Publishable Key:</label>
+          <input type="text" id="stripe-publishable-key-input" placeholder="Enter Stripe Publishable Key" style="margin-right: 10px;">
+          <button onclick="setStripePublishableKey()" style="padding: 5px 10px;">Set Stripe Publishable Key</button>
+        </div>
       </div>
       <div class="tab-content active" id="buy-credits">
         <div class="spinner" style="display: none; margin: 10px auto;"></div>
@@ -1460,7 +1466,8 @@
         setCommunityClientId,
         setSubCommunity,
         setCommunityApiToken,
-        toggleTestMode
+        toggleTestMode,
+        setStripePublishableKey
       } from '/static/settings.js';
       window.setMaxWorkers = setMaxWorkers; // Expose it globally for onclick
       window.setKlaviyoApiKey = setKlaviyoApiKey; // Expose it globally for onclick
@@ -1468,6 +1475,7 @@
       window.setSubCommunity = setSubCommunity; // Expose it globally for onclick
       window.setCommunityApiToken = setCommunityApiToken; // Expose it globally for onclick
       window.toggleTestMode = toggleTestMode;
+      window.setStripePublishableKey = setStripePublishableKey;
     </script>
     <script type="module">
       import {

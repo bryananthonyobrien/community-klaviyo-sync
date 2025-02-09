@@ -44,44 +44,6 @@ def create_user_logger(username):
     return logger
 
 
-# Get Klaviyo Profile Count
-def get_klaviyo_profile_count(phone_number, logger=None):
-    logger = logger or app_logger
-    klaviyo_private_api_key = os.getenv('KLAVIYO_READ_PROFILE_API_KEY')
-
-    if not klaviyo_private_api_key:
-        logger.error("Klaviyo Private API key not set in environment variables.")
-        return 1  # Default deduction if API key is missing
-
-    klaviyo_url = f"https://a.klaviyo.com/api/profiles/?filter=equals(phone_number,\"{phone_number}\")&page[size]=20"
-    headers = {
-        "Authorization": f"Klaviyo-API-Key {klaviyo_private_api_key}",
-        "Accept": "application/json",
-        "Revision": "2024-07-15"
-    }
-
-    try:
-        response = requests.get(klaviyo_url, headers=headers)
-        response.raise_for_status()
-
-        data = response.json()
-        profile_count = len(data.get('data', []))
-        logger.debug(f"Klaviyo returned {profile_count} profiles for phone number {phone_number}")
-
-        timestamp = datetime.utcnow().strftime('%Y-%m-%d-%H:%M:%S')
-        filename = f"klaviyo_profiles_{timestamp}_{profile_count}.json"
-        with open(filename, 'w') as f:
-            json.dump(data, f, indent=4)
-
-        logger.debug(f"Klaviyo response logged to {filename}")
-        return profile_count
-
-    except requests.RequestException as e:
-        logger.error(f"Error calling Klaviyo API: {str(e)}")
-        logger.debug(f"Klaviyo API response: {response.text if 'response' in locals() else 'No response'}")
-        return 1  # Fallback to the default deduction amount
-
-
 def get_klaviyo_profiles(username, start_time, new_discovery=True, mode='sync', logger=None):
     logger = logger or getLogger(__name__)
 

@@ -208,6 +208,7 @@ export async function loadConfiguration() {
         document.getElementById('community-api-token-input').value = data.community_api_token || '';
         document.getElementById('max-workers-input').value = data.max_workers || '';
         document.getElementById('sub-community-input').value = data.sub_community || '';
+        document.getElementById('stripe-publishable-key-input').value = data.stripe_publishable_key || '';
 
         console.log('Configuration loaded successfully:', data);
 

@@ -65,6 +65,38 @@ export function setKlaviyoApiKey() {
     });
 }
 
+export function setStripePublishableKey() {
+    const stripePublishableKeyInput = document.getElementById('stripe-publishable-key-input'); // Assuming there's an input field for Stripe Publishable Key
+    const stripePublishableKeyValue = stripePublishableKeyInput.value;
+
+    if (!stripePublishableKeyValue) {
+        return;
+    }
+
+    // Assuming you have a function to make requests to your server
+    makeRequestWithTokenRefresh(async (token) => {
+        return fetch(`${API_URL}/set_stripe_publishable_key`, {
+            method: 'POST',
+            headers: createAuthorizedHeaders(token),
+            body: JSON.stringify({
+                stripe_publishable_key: stripePublishableKeyValue
+            })
+        });
+    }).then(response => {
+        if (response.ok) {
+            console.log('Stripe Publishable Key updated successfully');
+            alert('Stripe Publishable Key updated successfully.');
+        } else {
+            console.error('Failed to update Stripe Publishable Key');
+            alert('Failed to update Stripe Publishable Key.');
+        }
+    }).catch(error => {
+        console.error('Error updating Stripe Publishable Key:', error);
+        alert('Error updating Stripe Publishable Key.');
+    });
+}
+
+
 export function setCommunityClientId() {
     const communityClientIdInput = document.getElementById('community-client-id-input'); // Assuming there's an input field for Community Client ID
     const communityClientIdValue = communityClientIdInput.value;
