@@ -79,6 +79,7 @@ async function login() {
                     const data = await response.json();
                     console.log('Login successful:', data);
                     updateLocalStorage(data);
+                    initializeStripe();
                     window.location.href = (data.role === 'admin') ? '/admin' : '/client';
                 } else {
                     const errorData = await response.json();

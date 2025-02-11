@@ -520,7 +520,20 @@ def remove_user(username):
                 logging.warning(f"User {username} not found.")
     except sqlite3.Error as e:
         logging.error(f"Database error: {e}")
+        
+    remove_klaviyo_discoveries(username)
     set_database_status('idle')
+    remove_user_transactions(username)
+    redis_client = get_redis_client()
+    redis_key = f"memberships_{username}"
+    redis_client.delete(redis_key)  # Clear previous data if any
+    redis_key = f"communities_{username}"
+    redis_client.delete(redis_key)  # Clear previous data if any
+    redis_key = f"members_{username}"
+    redis_client.delete(redis_key)  # Clear previous data if any
+    redis_key = f"configuration_{username}"
+    redis_client.delete(redis_key)  # Clear previous data if any
+
 
 def remove_klaviyo_discoveries(username):
     try:
