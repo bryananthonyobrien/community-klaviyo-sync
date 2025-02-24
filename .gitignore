@@ -8,4 +8,7 @@ Data/
 dump.rdb
 app.log
 stripe.cfg
+newswhip/
+minikube-darwin-arm64
+
 

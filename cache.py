@@ -4,7 +4,7 @@ import threading
 from redis import Redis
 from logs import app_logger  # Ensure this import is correct and does not cause circular imports
 from redis import exceptions as redis_exceptions
-from common import get_db_connection  # Import the get_db_connection function from the common module
+from common import decode_redis_values, get_db_connection  # Import the get_db_connection function from the common module
 from datetime import datetime
 import sqlite3
 import csv
@@ -183,19 +183,59 @@ def initialize_cache(app=None):
         app_logger.error(f"Error initializing cache: {str(e)}")
         return "Error initializing cache."
 
-def initialize_user_cache(username, credits, user_status='active'):  # Changed status to user_status
+def initialize_user_cache(username, password, role='client', login_attempts=0, last_login_attempt='None', credits=10, user_status='active', is_logged_in_now=0, created='None', daily_limit=200, hourly_limit=50, minute_limit=10):
     try:
         redis_client = get_redis_client()
+
+        # Check for existence of global revoked_tokens and issued_tokens sets, create if they don't exist
+        revoked_tokens_key = "revoked_tokens"
+        issued_tokens_key = "issued_tokens"
+
+        # Check and create revoked_tokens set if it doesn't exist
+        if not redis_client.exists(revoked_tokens_key):
+            redis_client.sadd(revoked_tokens_key, '')  # Initialize with an empty value if not exists
+            app_logger.info(f"Created global Redis set for {revoked_tokens_key}.")
+
+        # Check and create issued_tokens set if it doesn't exist
+        if not redis_client.exists(issued_tokens_key):
+            redis_client.sadd(issued_tokens_key, '')  # Initialize with an empty value if not exists
+            app_logger.info(f"Created global Redis set for {issued_tokens_key}.")
+
+        # Prepare the user data dictionary with all the necessary attributes
         user_data = {
-            "api_calls": 0,
+            "password": password,  # Store the hashed password
+            "role": role,
+            "login_attempts": login_attempts,
+            "last_login_attempt": last_login_attempt if last_login_attempt else '',  # Default to empty string if None
             "credits": credits,
-            "user_status": user_status  # Changed status to user_status
+            "user_status": user_status,
+            "is_logged_in_now": is_logged_in_now,
+            "created": created if created else datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')  # Default to current timestamp if None
         }
-        redis_client.hmset(username, user_data)
-        app_logger.info(f"Cache initialized for user: {username}")
+
+        # Store all this data in Redis using hset (for hash values)
+        redis_client.hset(username, mapping=user_data)  # Store user data in Redis
+
+        # Store the user's limits in Redis hash (passed as arguments)
+        limits = {
+            "daily_limit": daily_limit,
+            "hourly_limit": hourly_limit,
+            "minute_limit": minute_limit
+        }
+        redis_client.hmset(f"{username}:limits", limits)
+
+        # Initialize the user's credit_changes as an empty list (if no changes yet)
+        redis_client.delete(f"{username}:credit_changes")  # Clean up if it exists already
+        redis_client.lpush(f"{username}:credit_changes", f"Initial credit set to {credits} at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # Log the initialization of the user's cache in Redis
+        app_logger.info(f"Cache initialized for user: {username} with all attributes.")
+        app_logger.info(f"Limits set for user {username}: Daily={daily_limit}, Hourly={hourly_limit}, Minute={minute_limit}")
+        app_logger.info(f"Initial credits set for user {username}.")
+
     except Exception as e:
         app_logger.error(f"Error initializing cache for user {username}: {str(e)}")
-
+      
 def suspend_user_cache(username):
     try:
         redis_client = get_redis_client()
@@ -1847,22 +1887,66 @@ def get_user_data(user_id):
         try:
             redis_client = get_redis_client()
             user_data = redis_client.hgetall(user_id)
+
+            # If no data is found, return default values for all attributes
             if not user_data:
-                user_data = {'api_calls': 0, 'credits': 0, 'user_status': 'active'}  # Changed status to user_status
-            else:
-                user_data = {k.decode(): (int(v.decode()) if k.decode() not in ['user_status'] else v.decode()) for k, v in user_data.items()}
+                user_data = {
+                    'api_calls': 0, 
+                    'credits': 0, 
+                    'user_status': 'active', 
+                    'password': None,
+                    'login_attempts': 0, 
+                    'last_login_attempt': 'None', 
+                    'is_logged_in_now': 0,
+                    'created': 'None', 
+                    'role': 'client'
+                }
 
-            api_calls = user_data.get('api_calls', 0)
-            credits = user_data.get('credits', 0)
-            user_status = user_data.get('user_status', 'active')  # Changed status to user_status
+            # Ensure 'api_calls' is in the data
+            if 'api_calls' not in user_data:
+                user_data['api_calls'] = 0
 
-            app_logger.debug(f"get_user_data: User: {user_id}, API Calls Made: {api_calls}, Credits: {credits}, User Status: {user_status}")  # Changed status to user_status
+            # Decode all byte-encoded values and handle them appropriately
+            decoded_data = {}
+            for k, v in user_data.items():
+                # If the key is a byte string, decode it
+                decoded_key = k.decode('utf-8') if isinstance(k, bytes) else k
+                
+                # If the value is a byte string, decode it
+                if isinstance(v, bytes):
+                    decoded_value = v.decode('utf-8')  # Decode value to string
+                    # If it's a value we expect to be numeric, convert it to integer
+                    if decoded_key in ['login_attempts', 'credits', 'is_logged_in_now', 'api_calls']:
+                        try:
+                            decoded_value = int(decoded_value)
+                        except ValueError:
+                            decoded_value = 0  # Fallback to 0 if not convertible to integer
+                else:
+                    decoded_value = v
+
+                decoded_data[decoded_key] = decoded_value
+
+            # Now user_data is fully decoded and ready to be used
+            app_logger.debug(f"get_user_data: User: {user_id}, Decoded Data: {decoded_data}")
+
             cache_status = "Cache Available"
-            return {'api_calls': api_calls, 'credits': credits, 'user_status': user_status}, cache_status  # Changed status to user_status
+            return decoded_data, cache_status  # Return decoded data
+
         except redis_exceptions.ConnectionError as e:
             app_logger.error(f"Redis connection error in get_user_data: {str(e)}")
             cache_status = "Cache Unavailable"
-            return {'api_calls': 0, 'credits': 0, 'user_status': 'active'}, cache_status  # Changed status to user_status
+            return {
+                'api_calls': 0, 
+                'credits': 0, 
+                'user_status': 'active', 
+                'password': None,
+                'login_attempts': 0, 
+                'last_login_attempt': 'None', 
+                'is_logged_in_now': 0,
+                'created': 'None', 
+                'role': 'client'
+            }, cache_status  # Fallback to default values
+
 
 def reset_user_data(user_id):
     global cache_status

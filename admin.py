@@ -31,6 +31,7 @@ import time
 import requests
 from requests.exceptions import SSLError, RequestException
 from redis import Redis, exceptions as redis_exceptions
+import redis
 
 
 import sys
@@ -93,374 +94,67 @@ redis_client = Redis(
     db=int(os.getenv('REDIS_DB', 0))
 )
 
-def get_cache_status():
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT status FROM cache_status ORDER BY last_updated DESC LIMIT 1")
-            result = cursor.fetchone()
-            if result:
-                return result[0]
-            return "No cache status found."
-    except Exception as e:
-        logging.error(f"Error fetching cache status: {str(e)}")
-        return "Error fetching cache status."
 
-def is_app_running():
-    try:
-        response = requests.get(f"{SERVER_RUNNING_URL}", timeout=5)
-        if response.status_code == 200:
-            return True
-    except SSLError:
-        print("Server is not running due to SSL certificate issues.")
-    except RequestException:
-        print("Server is not running.")
-    return False
-
-def get_db_connection():
-    retries = 10  # Increase retries to 10
-    while retries > 0:
-        try:
-            conn = sqlite3.connect(DATABASE_PATH, timeout=10)  # Increase timeout to 10 seconds
-            conn.execute('PRAGMA journal_mode=WAL;')  # Enable WAL mode
-            return conn
-        except sqlite3.OperationalError as e:
-            if "database is locked" in str(e):
-                retries -= 1
-                time.sleep(1)  # Wait before retrying
-            else:
-                raise
-    raise sqlite3.OperationalError("Database is locked, retries exhausted")
-
-def ensure_database_status_table_exists():
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS database_status (
-                status TEXT,
-                command TEXT,
-                start_time DATETIME
-            )
-        """)
-        cursor.execute("INSERT OR IGNORE INTO database_status (status) VALUES ('idle')")
-        conn.commit()
-
-def reset_database_status():
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE database_status SET status = 'idle', command = NULL, start_time = NULL")
-            conn.commit()
-            logging.info("Database status reset to idle.")
-    except sqlite3.Error as e:
-        logging.error(f"Error resetting database status: {e}")
-
-def initialize_tables():
-    ensure_database_status_table_exists()
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                username TEXT PRIMARY KEY,
-                password TEXT,
-                role TEXT DEFAULT 'client',
-                login_attempts INTEGER DEFAULT 0,
-                last_login_attempt DATETIME,
-                credits INTEGER DEFAULT 10,
-                user_status TEXT DEFAULT 'active',
-                is_logged_in_now BOOLEAN DEFAULT FALSE,
-                created DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS revoked_tokens (
-                jti TEXT PRIMARY KEY,
-                username TEXT,
-                jwt TEXT,
-                expires_at DATETIME,
-                reason TEXT,
-                FOREIGN KEY (username) REFERENCES users (username)
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS issued_tokens (
-                jti TEXT PRIMARY KEY,
-                username TEXT,
-                jwt TEXT,
-                expires_at DATETIME,
-                type TEXT,
-                FOREIGN KEY (username) REFERENCES users (username)
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS limits (
-                user_id TEXT PRIMARY KEY,
-                daily_limit INTEGER DEFAULT 200,
-                hourly_limit INTEGER DEFAULT 50,
-                minute_limit INTEGER DEFAULT 10,
-                FOREIGN KEY (user_id) REFERENCES users (username)
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS credit_changes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT,
-                change_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-                amount INTEGER,
-                source TEXT,
-                transaction_id TEXT,
-                FOREIGN KEY (user_id) REFERENCES users (username)
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS cache_status (
-                id INTEGER PRIMARY KEY,
-                status TEXT,
-                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_revoked_tokens_jti ON revoked_tokens (jti);
-        """)
-        conn.commit()
-
-
-def log_issued_tokens(conn=None):
-    try:
-        # Use existing connection if provided, else create a new one
-        use_conn = conn if conn else get_db_connection()
-        with use_conn:
-            cursor = use_conn.cursor()
-            cursor.execute("SELECT jti, username, jwt, expires_at FROM issued_tokens")
-            tokens = cursor.fetchall()
-
-            # Log the full contents of the issued_tokens table
-            logging.info("Full contents of issued_tokens table:")
-            for token in tokens:
-                logging.info(f"jti: {token[0]}, username: {token[1]}, jwt: {token[2]}, expires_at: {token[3]}")
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-
-def drop_and_create_tables():
-    if not check_and_set_busy('reset_schema'):
-        return
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DROP TABLE IF EXISTS users")
-            cursor.execute("DROP TABLE IF EXISTS revoked_tokens")
-            cursor.execute("DROP TABLE IF EXISTS issued_tokens")
-            cursor.execute("DROP TABLE IF EXISTS database_status")
-            cursor.execute("DROP TABLE IF EXISTS limits")
-            cursor.execute("DROP TABLE IF EXISTS credit_changes")
-            cursor.execute("DROP TABLE IF EXISTS cache_status")  # Add this line
-            cursor.execute("""
-                CREATE TABLE users (
-                    username TEXT PRIMARY KEY,
-                    password TEXT,
-                    role TEXT DEFAULT 'client',
-                    login_attempts INTEGER DEFAULT 0,
-                    last_login_attempt DATETIME,
-                    credits INTEGER DEFAULT 10,
-                    user_status TEXT DEFAULT 'active',
-                    is_logged_in_now BOOLEAN DEFAULT FALSE,
-                    created DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            cursor.execute("""
-                CREATE TABLE revoked_tokens (
-                    jti TEXT PRIMARY KEY,
-                    username TEXT,
-                    jwt TEXT,
-                    expires_at DATETIME,
-                    reason TEXT,
-                    FOREIGN KEY (username) REFERENCES users (username)
-                )
-            """)
-            cursor.execute("""
-                CREATE TABLE issued_tokens (
-                    jti TEXT PRIMARY KEY,
-                    username TEXT,
-                    jwt TEXT,
-                    expires_at DATETIME,
-                    type TEXT,
-                    FOREIGN KEY (username) REFERENCES users (username)
-                )
-            """)
-            cursor.execute("""
-                CREATE TABLE database_status (
-                    status TEXT,
-                    command TEXT,
-                    start_time DATETIME
-                )
-            """)
-            cursor.execute("INSERT INTO database_status (status) VALUES ('idle')")
-            cursor.execute(f"""
-                CREATE TABLE limits (
-                    user_id TEXT PRIMARY KEY,
-                    daily_limit INTEGER DEFAULT {DEFAULT_DAILY_LIMIT},
-                    hourly_limit INTEGER DEFAULT {DEFAULT_HOURLY_LIMIT},
-                    minute_limit INTEGER DEFAULT {DEFAULT_MINUTE_LIMIT},
-                    FOREIGN KEY (user_id) REFERENCES users (username)
-                )
-            """)
-            cursor.execute("""
-                CREATE TABLE credit_changes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT,
-                    change_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    amount INTEGER,
-                    source TEXT,
-                    transaction_id TEXT,
-                    FOREIGN KEY (user_id) REFERENCES users (username)
-                )
-            """)
-            cursor.execute("""
-                CREATE TABLE cache_status (
-                    id INTEGER PRIMARY KEY,
-                    status TEXT,
-                    last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)  # Add this block
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_revoked_tokens_jti ON revoked_tokens (jti);
-            """)
-            conn.commit()
-            logging.info("Tables 'users', 'revoked_tokens', 'issued_tokens', 'database_status', 'limits', 'credit_changes', and 'cache_status' created successfully.")
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-    set_database_status('idle')
-
-    add_user('admin123', 'admin123', 'admin')
-
-    while not is_app_running():
-        print("Waiting for app.py to start running...")
-        time.sleep(5)  # Wait for 5 seconds before checking again
-
-    while True:
-        action = input("app.py is running. Do you want to (1) login_admin_user and (2) persist_client_data? (Y/N): ")
-        if action.lower() == 'y':
-            login_admin_user()
-            persist_client_data()
-            break
-        elif action.lower() == 'n':
-            print("Skipping login and persist data.")
-            break
-        else:
-            print("Invalid input. Please enter 'Y' or 'N'.")
-
-
-def set_database_status(status, command=None):
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            if status == 'busy':
-                cursor.execute("BEGIN IMMEDIATE")
-                cursor.execute("UPDATE database_status SET status = ?, command = ?, start_time = ?", (status, command, datetime.utcnow()))
-                cursor.execute("COMMIT")
-            else:
-                cursor.execute("BEGIN IMMEDIATE")
-                cursor.execute("UPDATE database_status SET status = ?, command = NULL, start_time = NULL", (status,))
-                cursor.execute("COMMIT")
-    except sqlite3.Error as e:
-        logging.error(f"Error setting database status: {e}")
-        cursor.execute("ROLLBACK")
-
-def get_database_status():
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT status, command, start_time FROM database_status LIMIT 1")
-        result = cursor.fetchone()
-        return result if result else ('idle', None, None)
-
-def check_and_set_busy(command):
-    status, running_command, start_time = get_database_status()
-    if status == 'busy':
-        elapsed_time = datetime.utcnow() - datetime.fromisoformat(start_time) if start_time else 'unknown'
-        print(f"Database is currently busy with command '{running_command}', running for {elapsed_time}. Please try again later.")
-        return False
-    set_database_status('busy', command)
-    return True
 
 def user_exists(username):
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1 FROM users WHERE username = ?", (username,))
-            return cursor.fetchone() is not None
-    except sqlite3.Error as e:
-        logging.error(f"Database error during user existence check: {e}")
+        redis_client = get_redis_client()
+        # Check if the 'credits' field exists in the user's hash
+        if redis_client.hexists(username, 'credits'):
+            return True
+        else:
+            return False
+    except redis.RedisError as e:
+        logging.error(f"Redis error during user existence check: {e}")
         return False
 
 def add_user(username, password, role='client'):
-    if not check_and_set_busy('add_user'):
-        return
+
     if len(password) < 8:
         logging.error("Password must be at least 8 characters long.")
-        set_database_status('idle')
         return
 
     if user_exists(username):
         logging.warning(f"User {username} already exists.")
-        set_database_status('idle')
         return
 
     hashed_password = generate_password_hash(password)
+
+    # Set default limits if not provided
+    daily_limit = int(os.getenv('DEFAULT_DAILY_LIMIT', 200))
+    hourly_limit = int(os.getenv('DEFAULT_HOURLY_LIMIT', 50))
+    minute_limit = int(os.getenv('DEFAULT_MINUTE_LIMIT', 10))
+
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    username TEXT PRIMARY KEY,
-                    password TEXT,
-                    role TEXT DEFAULT 'client',
-                    login_attempts INTEGER DEFAULT 0,
-                    last_login_attempt DATETIME,
-                    credits INTEGER DEFAULT 10,
-                    user_status TEXT DEFAULT 'active',
-                    is_logged_in_now BOOLEAN DEFAULT FALSE,
-                    created DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            cursor.execute("INSERT INTO users (username, password, role, credits, user_status) VALUES (?, ?, ?, 10, 'active')", (username, hashed_password, role))
+        # Directly initialize user cache with all the attributes and the limits
+        initialize_user_cache(
+            username,
+            password=hashed_password,
+            role=role,
+            login_attempts=0,  # Default to 0 login attempts
+            last_login_attempt='None',  # No login attempt yet
+            credits=10,  # Default to 10 credits
+            user_status='active',
+            is_logged_in_now=0,  # Default to not logged in
+            created=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),  # Set creation timestamp
+            daily_limit=daily_limit,  # Pass daily limit
+            hourly_limit=hourly_limit,  # Pass hourly limit
+            minute_limit=minute_limit  # Pass minute limit
+        )
 
-            conn.commit()
-            logging.info(f"User {username} added successfully with role {role} and 10 initial credits.")
+        logging.info(f"User {username} added successfully with role {role} and 10 initial credits.")
 
-            # Log the initial credits
-            cursor.execute("""
-                INSERT INTO credit_changes (user_id, amount, source, transaction_id, change_date)
-                VALUES (?, ?, 'initial', '0', ?)
-            """, (username, 10, datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')))
-            conn.commit()
-
-            # Set limits for the new user
-            cursor.execute("""
-                INSERT OR REPLACE INTO limits (user_id, daily_limit, hourly_limit, minute_limit)
-                VALUES (?, ?, ?, ?)
-            """, (
-                username,
-                DEFAULT_DAILY_LIMIT,
-                DEFAULT_HOURLY_LIMIT,
-                DEFAULT_MINUTE_LIMIT
-            ))
-            conn.commit()
-
-            # Initialize user cache
-            initialize_user_cache(username, 10, 'active')
-
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-    set_database_status('idle')
-
+    except Exception as e:
+        logging.error(f"Error during user creation in Redis: {e}")
 
 
 def secure_user_account():
-    if not check_and_set_busy('secure_user_account'):
-        return
-
     username = input("Enter username: ")
-    if not user_exists(username):
+
+    # Check if user exists in Redis
+    redis_client = get_redis_client()
+    user_key = username
+    if not redis_client.exists(user_key):  # If the user's Redis key doesn't exist
         logging.warning(f"User {username} does not exist.")
         set_database_status('idle')
         return
@@ -472,68 +166,147 @@ def secure_user_account():
         return
 
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
+        # Step 1: Suspend the user (Update user status to 'suspended')
+        redis_client.hset(user_key, 'user_status', 'suspended')
+        logging.info(f"User {username} has been suspended.")
 
-            # Step 1: Suspend the user
-            cursor.execute("UPDATE users SET user_status = 'suspended' WHERE username = ?", (username,))
+        # Step 2: Revoke all tokens
+        issued_tokens_key = "issued_tokens"
+        revoked_tokens_key = "revoked_tokens"
 
-            # Step 2: Revoke all tokens
-            cursor.execute("""
-                INSERT INTO revoked_tokens (jti, username, jwt, expires_at, reason)
-                SELECT jti, username, jwt, expires_at, 'admin'
-                FROM issued_tokens
-                WHERE username = ?
-            """, (username,))
-            cursor.execute("DELETE FROM issued_tokens WHERE username = ?", (username,))
+        # Fetch all issued tokens for this user (they are stored in the global set)
+        tokens = redis_client.smembers(f"{issued_tokens_key}:{username}")
+        
+        if tokens:
+            for token in tokens:
+                redis_client.sadd(revoked_tokens_key, token)  # Add token to revoked set
+                redis_client.srem(f"{issued_tokens_key}:{username}", token)  # Remove token from issued set
 
-            # Step 3: Change the password
-            hashed_password = generate_password_hash(new_password)
-            cursor.execute("UPDATE users SET password = ? WHERE username = ?", (hashed_password, username))
+            logging.info(f"All tokens for user {username} have been revoked.")
+        else:
+            logging.info(f"No tokens found for user {username}.")
 
-            # Step 4: Unsuspend the user
-            cursor.execute("UPDATE users SET user_status = 'active' WHERE username = ?", (username,))
+        # Step 3: Change the password (set the new password in Redis)
+        hashed_password = generate_password_hash(new_password)
+        redis_client.hset(user_key, 'password', hashed_password)
+        logging.info(f"Password for user {username} updated successfully.")
 
-            conn.commit()
-            logging.info(f"User {username}'s account has been secured successfully.")
+        # Step 4: Unsuspend the user (Update user status to 'active')
+        redis_client.hset(user_key, 'user_status', 'active')
+        logging.info(f"User {username} has been unsuspended and is now active.")
 
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-        conn.rollback()
-    set_database_status('idle')
+        logging.info(f"User {username}'s account has been secured successfully.")
+
+    except redis_exceptions.ConnectionError as e:
+        logging.error(f"Redis connection error: {str(e)}")
+    except Exception as e:
+        logging.error(f"Error securing user account: {str(e)}")
+ 
+def revoke_all_tokens_for_user(username):
+    try:
+        redis_client = get_redis_client()
+
+        # Global keys for issued and revoked tokens (sets)
+        issued_tokens_key = "issued_tokens"
+        revoked_tokens_key = "revoked_tokens"
+
+        # Check if the 'revoked_tokens' set exists and create it if it doesn't
+        if not redis_client.exists(revoked_tokens_key):
+            redis_client.sadd(revoked_tokens_key, '')  # Initialize as an empty set
+            print(f"Created global Redis set for {revoked_tokens_key}.")
+
+        # Check if the 'issued_tokens' set exists and create it if it doesn't
+        if not redis_client.exists(issued_tokens_key):
+            print(f"Global Redis set for {issued_tokens_key} does not exist.")
+            return  # Exit if there are no issued tokens for this user
+
+        # Fetch all the issued tokens for the user from the global issued_tokens set
+        tokens = redis_client.smembers(issued_tokens_key)
+
+        # Iterate over the tokens and revoke the user's access and refresh tokens
+        for jti in tokens:
+            try:
+                # Decode the token data stored in the set (stored as JSON)
+                token_data = jti.decode('utf-8')  # Decode byte string to UTF-8 string
+
+                # Skip empty tokens or malformed tokens
+                if not token_data:
+                    print(f"Skipping empty token {jti} for user {username}")
+                    continue
+
+                try:
+                    token_data = json.loads(token_data)  # Decode to JSON
+                except json.JSONDecodeError as e:
+                    print(f"Error decoding token {jti} for user {username}: {str(e)}. Skipping token.")
+                    continue
+
+                jwt_token = token_data.get('jwt')
+                expires_at = token_data.get('expires_at')
+                token_type = token_data.get('type')
+
+                if jwt_token and expires_at and token_type:
+                    # Check if the token type is access or refresh
+                    if token_type in ['access', 'refresh']:
+                        # Add the token to the global revoked tokens list
+                        redis_client.sadd(revoked_tokens_key, jti)  # Adding to global revoked tokens set
+
+                        # Remove the token from the global issued tokens in Redis
+                        redis_client.srem(issued_tokens_key, jti)  # Remove JTI from issued set
+
+                        print(f"Revoked and deleted {token_type} token {jti} for user {username}")
+                    else:
+                        print(f"Token {jti} for user {username} is not an access or refresh token, skipping.")
+                else:
+                    print(f"Missing data for token {jti} for user {username}, skipping.")
+
+            except Exception as e:
+                print(f"Error processing token {jti} for user {username}: {str(e)}")
+                continue
+
+        print(f"Revoked all tokens for user: {username}")
+
+    except Exception as e:
+        print(f"Error revoking tokens for user {username}: {str(e)}")
+        raise e
 
 def remove_user(username):
-    if not check_and_set_busy('remove_user'):
-        return
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM revoked_tokens WHERE username = ?", (username,))
-            cursor.execute("DELETE FROM issued_tokens WHERE username = ?", (username,))
-            cursor.execute("DELETE FROM users WHERE username = ?", (username,))
-            cursor.execute("DELETE FROM limits WHERE user_id = ?", (username,))
-            conn.commit()
-            if cursor.rowcount > 0:
-                logging.info(f"User {username} and their tokens removed successfully.")
-                remove_user_from_cache(username)  # Remove user from cache
-            else:
-                logging.warning(f"User {username} not found.")
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-        
-    remove_klaviyo_discoveries(username)
-    set_database_status('idle')
-    remove_user_transactions(username)
-    redis_client = get_redis_client()
-    redis_key = f"memberships_{username}"
-    redis_client.delete(redis_key)  # Clear previous data if any
-    redis_key = f"communities_{username}"
-    redis_client.delete(redis_key)  # Clear previous data if any
-    redis_key = f"members_{username}"
-    redis_client.delete(redis_key)  # Clear previous data if any
-    redis_key = f"configuration_{username}"
-    redis_client.delete(redis_key)  # Clear previous data if any
+        # Call remove_user_transactions if needed (assuming this is separate logic)
+        remove_user_transactions(username)
 
+        redis_client = get_redis_client()
+
+        # Define the Redis keys associated with the user
+        redis_keys = [
+            f"{username}",  # User's main data (hash)
+            f"klaviyo_discoveries_{username}",  # Klaviyo discoveries data
+            f"memberships_{username}",  # Membership-related data
+            f"communities_{username}",  # Community-related data
+            f"members_{username}",  # Members data
+            f"configuration_{username}",  # User's configuration data
+            f"{username}:limits",  # User's limits (hash)
+            f"{username}:credit_changes"  # User's credit changes (list)
+        ]
+
+        # Revoke all tokens before deleting user data
+        revoke_all_tokens_for_user(username)  # This should handle adding tokens to revoked_tokens
+
+        # Iterate over all keys and delete them if they exist
+        for redis_key in redis_keys:
+            if redis_client.exists(redis_key):
+                redis_client.delete(redis_key)
+                print(f"Key '{redis_key}' deleted from Redis.")
+            else:
+                print(f"Key '{redis_key}' does not exist in Redis.")
+
+        # Optionally, delete the user's data from the global revoked and issued token sets
+        redis_client.srem("revoked_tokens", username)  # Remove user's tokens from global revoked set
+        redis_client.srem("issued_tokens", username)  # Remove user's tokens from global issued set
+
+    except redis_exceptions.ConnectionError as e:
+        print(f"Redis connection error: {str(e)}")
+    except Exception as e:
+        print(f"Error removing user data from Redis: {str(e)}")
 
 def remove_klaviyo_discoveries(username):
     try:
@@ -592,113 +365,74 @@ def display_discoveries_records(username):
         print(f"Error retrieving data from Redis: {str(e)}")
 
 def list_users():
-    if not check_and_set_busy('list_users'):
-        return
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT u.username,
-                       (SELECT COUNT(*) FROM issued_tokens WHERE username = u.username) as issued_count,
-                       (SELECT COUNT(*) FROM revoked_tokens WHERE username = u.username) as revoked_count,
-                       u.role,
-                       u.credits,
-                       u.user_status,
-                       u.login_attempts,
-                       u.last_login_attempt,
-                       u.is_logged_in_now,
-                       u.created
-                FROM users u
-            """)
-            users = cursor.fetchall()
-            if users:
-                print(f"{'Username':<20} {'Issued Tokens':<15} {'Revoked Tokens':<15} {'Role':<10} {'Credits':<10} {'Status':<10} {'Login Attempts':<15} {'Last Login Attempt':<20} {'Logged In Now':<15} {'Created'}")
-                for user in users:
-                    username = user[0] if user[0] else ''
-                    issued_count = user[1] if user[1] is not None else 0
-                    revoked_count = user[2] if user[2] is not None else 0
-                    role = user[3] if user[3] else ''
-                    credits = user[4] if user[4] is not None else 0
-                    status = user[5] if user[5] else ''
-                    login_attempts = user[6] if user[6] is not None else 0
-                    last_login_attempt = user[7] if user[7] else ''
-                    is_logged_in_now = 'False' if user[8] is None or user[8] == 0 else 'True'
-                    created = user[9] if user[9] else ''
-                    print(f"{username:<20} {issued_count:<15} {revoked_count:<15} {role:<10} {credits:<10} {status:<10} {login_attempts:<15} {last_login_attempt:<20} {is_logged_in_now:<15} {created}")
-            else:
-                print("No users found.")
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-    set_database_status('idle')
+        redis_client = get_redis_client()
+        # Iterate through all user-related keys in Redis
+        user_keys = redis_client.keys('*')  # Fetch all keys or specify patterns like '*:user' or similar
+
+        if user_keys:
+            print(f"{'Username':<20} {'Issued Tokens':<15} {'Revoked Tokens':<15} {'Role':<10} {'Credits':<10} {'Status':<10} {'Login Attempts':<15} {'Last Login Attempt':<20} {'Logged In Now':<15} {'Created'}")
+            for key in user_keys:
+                username = key.decode('utf-8')  # Decode Redis key to string
+                
+                # Debug: print the key and its type
+                key_type = redis_client.type(key).decode('utf-8')
+
+                # Check if the key is a hash type
+                if key_type == 'hash':
+                    # Fetch user data for the hash
+                    user_data = redis_client.hgetall(username)
+                    # Decode byte strings to proper values
+                    user_data = {k.decode('utf-8'): v.decode('utf-8') if isinstance(v, bytes) else v for k, v in user_data.items()}
+                    
+                    # Check if the key is a valid user hash (should contain specific attributes)
+                    if 'role' in user_data and 'credits' in user_data and 'user_status' in user_data:
+                        # Extract user data
+                        login_attempts = int(user_data.get('login_attempts', 0))
+                        last_login_attempt = user_data.get('last_login_attempt', '')
+                        user_status = user_data.get('user_status', 'active')
+                        is_logged_in_now = user_data.get('is_logged_in_now', 0)
+                        role = user_data.get('role', '')
+                        credits = int(user_data.get('credits', 0))
+                        created = user_data.get('created', '')
+
+                        # Fetch token counts (issued and revoked) from global sets
+                        issued_count = redis_client.scard(f"issued_tokens:{username}")  # Global issued tokens set
+                        revoked_count = redis_client.scard(f"revoked_tokens:{username}")  # Global revoked tokens set
+
+                        # Print user information
+                        print(f"{username:<20} {issued_count:<15} {revoked_count:<15} {role:<10} {credits:<10} {user_status:<10} {login_attempts:<15} {last_login_attempt:<20} {is_logged_in_now:<15} {created}")
+                        
+        else:
+            print("No users found.")
+    except redis_exceptions.ConnectionError as e:
+        print(f"Redis connection error: {str(e)}")
+    except Exception as e:
+        print(f"Error listing users: {str(e)}")
 
 def change_password(username, new_password):
-    if not check_and_set_busy('change_password'):
-        return
     if len(new_password) < 8:
         logging.error("Password must be at least 8 characters long.")
-        set_database_status('idle')
         return
 
-    if not user_exists(username):
-        logging.warning(f"User {username} does not exist.")
-        set_database_status('idle')
+    # Check if the user exists in Redis by looking for their data
+    redis_client = get_redis_client()
+    user_data_key = username
+
+    if not redis_client.exists(user_data_key):
+        logging.warning(f"User {username} does not exist in Redis.")
         return
 
+    # Generate the hashed password
     hashed_password = generate_password_hash(new_password)
+    
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE users SET password = ? WHERE username = ?", (hashed_password, username))
-            conn.commit()
-            if cursor.rowcount > 0:
-                logging.info(f"Password for user {username} updated successfully.")
-            else:
-                logging.warning(f"Password for user {username} not updated.")
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-    set_database_status('idle')
-
-def backup_database():
-    if not check_and_set_busy('backup_database'):
-        return
-    try:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        backup_filename = f"backup_{timestamp}.db"
-        shutil.copyfile(DATABASE_PATH, backup_filename)
-        logging.info(f"Database backed up to {backup_filename}.")
+        # Update the password in Redis
+        redis_client.hset(user_data_key, 'password', hashed_password)
+        logging.info(f"Password for user {username} updated successfully in Redis.")
     except Exception as e:
-        logging.error(f"Error during database backup: {e}")
-    set_database_status('idle')
+        logging.error(f"Error updating password for user {username} in Redis: {str(e)}")
 
-def restore_database():
-    if not check_and_set_busy('restore_database'):
-        return
-    try:
-        backups = sorted([f for f in os.listdir() if f.startswith("backup_") and f.endswith(".db")], reverse=True)
-
-        if not backups:
-            print("No backups available to restore.")
-            set_database_status('idle')
-            return
-
-        print("Available backups:")
-        for i, backup in enumerate(backups, 1):
-            print(f"{i}. {backup}")
-
-        choice = input("Enter the number of the backup to restore (default is the latest): ")
-
-        if choice.isdigit() and 1 <= int(choice) <= len(backups):
-            selected_backup = backups[int(choice) - 1]
-        else:
-            selected_backup = backups[0]  # Default to the latest backup
-
-        shutil.copyfile(selected_backup, DATABASE_PATH)
-        logging.info(f"Database restored from {selected_backup}.")
-        result = initialize_cache()
-
-    except Exception as e:
-        logging.error(f"Error during database restore: {e}")
-    set_database_status('idle')
 
 def format_timestamp(ts):
     if ts is None:
@@ -707,23 +441,30 @@ def format_timestamp(ts):
     return dt.strftime('%A, %B %d, %Y %H:%M:%S UTC')
 
 def list_tokens(username):
-    if not check_and_set_busy('list_tokens'):
-        return
+    redis_client = get_redis_client()
+    
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT jwt, 'issued' as source FROM issued_tokens WHERE username = ?
-                UNION ALL
-                SELECT jwt, 'revoked' as source FROM revoked_tokens WHERE username = ?
-            """, (username, username))
-            tokens = cursor.fetchall()
-            if tokens:
-                for token in tokens:
-                    jwt_token, source = token
+        # Fetch tokens from the global issued and revoked tokens sets for the user
+        issued_tokens_key = f"issued_tokens:{username}"
+        revoked_tokens_key = f"revoked_tokens:{username}"
+
+        # Get issued and revoked tokens from Redis
+        issued_tokens = redis_client.smembers(issued_tokens_key)
+        revoked_tokens = redis_client.smembers(revoked_tokens_key)
+
+        all_tokens = list(issued_tokens) + list(revoked_tokens)
+        
+        if all_tokens:
+            for token in all_tokens:
+                try:
+                    # Decode the token data (stored as a JSON string in the set)
+                    token_data = json.loads(token.decode('utf-8'))  # Decode byte string to UTF-8 string
+                    jwt_token = token_data.get("jwt")
+
                     if jwt_token:
                         try:
-                            decoded = jwt.decode(jwt_token.encode(), JWT_SECRET_KEY, algorithms=['HS256'])
+                            decoded = jwt.decode(jwt_token, JWT_SECRET_KEY, algorithms=['HS256'])
+                            
                             # Add formatted timestamps as comments in the decoded JSON
                             decoded_with_comments = {
                                 "fresh": decoded.get("fresh", False),
@@ -740,74 +481,92 @@ def list_tokens(username):
                                 "role": decoded.get("role"),
                                 "credits": decoded.get("credits")  # Add credits
                             }
-                            print(f"Token from {source} table:")
+
+                            # Print the token and its decoded details
+                            print(f"Token from {'issued' if token in issued_tokens else 'revoked'} tokens set:")
                             print(jwt_token)
                             print(json.dumps(decoded_with_comments, indent=4))
                             print("\n" + "-"*40 + "\n")
+                        
                         except jwt.ExpiredSignatureError:
                             logging.error("Error decoding token: Signature has expired.")
-                            print(f"Token from {source} table:")
+                            print(f"Token from {'issued' if token in issued_tokens else 'revoked'} tokens set:")
                             print(jwt_token)
                             print("Token has expired.")
                             print("\n" + "-"*40 + "\n")
+                        
                         except jwt.DecodeError as e:
                             logging.error(f"Error decoding token: {e}")
-                            print(f"Token from {source} table:")
+                            print(f"Token from {'issued' if token in issued_tokens else 'revoked'} tokens set:")
                             print(jwt_token)
                             print("Error decoding token.")
                             print("\n" + "-"*40 + "\n")
+                    
                     else:
                         logging.warning(f"Found a token for user {username} that is None.")
-            else:
-                print(f"No tokens found for user {username}.")
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+                except Exception as e:
+                    logging.error(f"Error processing token for user {username}: {str(e)}")
+                    continue
+        else:
+            print(f"No tokens found for user {username}.")
+    
+    except Exception as e:
+        logging.error(f"Error listing tokens for user {username}: {str(e)}")
+        print(f"Error fetching tokens for user {username}.")
+    
     finally:
-        set_database_status('idle')
+        print(f"Completed")
 
 def change_user_role(username, new_role):
-    if not check_and_set_busy('change_user_role'):
-        return
-
+    # Validate the new role
     if new_role not in ['admin', 'client']:
         logging.error("Invalid role. Must be 'admin' or 'client'.")
         set_database_status('idle')
         return
 
-    if not user_exists(username):
+    redis_client = get_redis_client()
+
+    # Check if the user exists in Redis (by checking if their hash exists)
+    user_data_key = username
+    if not redis_client.exists(user_data_key):
         logging.warning(f"User {username} does not exist.")
         set_database_status('idle')
         return
 
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE users SET role = ? WHERE username = ?", (new_role, username))
-            conn.commit()
-            if cursor.rowcount > 0:
-                logging.info(f"Role for user {username} updated to {new_role}.")
-            else:
-                logging.warning(f"Role for user {username} not updated.")
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-    set_database_status('idle')
-
-def log_credit_change(cursor, user_id, amount, source, transaction_id):
+        # Update the role field in the user's hash in Redis
+        redis_client.hset(user_data_key, "role", new_role)
+        
+        logging.info(f"Role for user {username} updated to {new_role}.")
+    except Exception as e:
+        logging.error(f"Error updating role for user {username}: {str(e)}")
+ 
+def log_credit_change(redis_client, username, amount, source, transaction_id):
     try:
-        cursor.execute("""
-            INSERT INTO credit_changes (user_id, amount, source, transaction_id, change_date)
-            VALUES (?, ?, ?, ?, ?)
-        """, (user_id, amount, source, transaction_id, datetime.utcnow()))
-    except sqlite3.Error as e:
-        logging.error(f"Database error logging credit change: {e}")
-        raise  # Re-raise the exception to be handled in the calling function
+        # Create the credit change log entry
+        credit_change = {
+            "username": username,
+            "amount": amount,
+            "source": source,
+            "transaction_id": transaction_id,
+            "change_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        # Store the credit change in a Redis list
+        redis_client.rpush(f"{username}:credit_changes", json.dumps(credit_change))
+        app_logger.debug(f"Logged credit change for user {username}: {credit_change}")
+    except Exception as e:
+        app_logger.error(f"Error logging credit change for user {username}: {e}")
+        raise
 
 def change_user_credits(username, credits, action):
     logging.info(f"Attempting to {action} {credits} credits for user {username}.")
-    if not check_and_set_busy('change_user_credits'):
-        return "Operation busy, please try again later."
+    
+    redis_client = get_redis_client()
 
-    if not user_exists(username):
+    # Check if user exists by verifying if their hash exists in Redis
+    user_data_key = username
+    if not redis_client.exists(user_data_key):
         logging.warning(f"User {username} does not exist.")
         set_database_status('idle')
         return f"User {username} does not exist."
@@ -817,148 +576,189 @@ def change_user_credits(username, credits, action):
         set_database_status('idle')
         return "Invalid action. Must be 'add' or 'remove'."
 
-    log_issued_tokens()
+    # Fetch the current credits from Redis
+    current_credits = int(redis_client.hget(user_data_key, "credits") or 0)
+    logging.info(f"Current credits for user {username}: {current_credits}")
 
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
+    if action == 'add':
+        new_credits = current_credits + credits
+        redis_client.hset(user_data_key, "credits", new_credits)
+        log_credit_change(redis_client, username, credits, 'admin', '0')
 
-            # Fetch current credits
-            cursor.execute("SELECT credits FROM users WHERE username = ?", (username,))
-            current_credits = cursor.fetchone()[0]
-            logging.info(f"Current credits for user {username}: {current_credits}")
+    elif action == 'remove':
+        new_credits = current_credits - credits
+        if new_credits < 0:
+            logging.error(f"Cannot remove {credits} credits from user {username}. This would result in negative credits.")
+            set_database_status('idle')
+            return f"Cannot remove {credits} credits from user {username}. This would result in negative credits."
+        redis_client.hset(user_data_key, "credits", new_credits)
+        log_credit_change(redis_client, username, -credits, 'admin', '0')
 
-            if action == 'add':
-                new_credits = current_credits + credits
-                cursor.execute("UPDATE users SET credits = ? WHERE username = ?", (new_credits, username))
-                log_credit_change(cursor, username, credits, 'admin', '0')
-            elif action == 'remove':
-                new_credits = current_credits - credits
-                if new_credits < 0:
-                    logging.error(f"Cannot remove {credits} credits from user {username}. This would result in negative credits.")
-                    set_database_status('idle')
-                    return f"Cannot remove {credits} credits from user {username}. This would result in negative credits."
-                cursor.execute("UPDATE users SET credits = ? WHERE username = ?", (new_credits, username))
-                log_credit_change(cursor, username, -credits, 'admin', '0')
+    # Log the updated credits
+    logging.info(f"Updated credits for user {username}: {new_credits}")
 
-            conn.commit()
+    # Update the cache (Redis already updated, so this part is not necessary)
+    # update_user_credits_in_cache(username, new_credits)
 
-            # Update the cache
-            update_user_credits_in_cache(username, new_credits)
-
-            # Log the updated credits
-            logging.info(f"Updated credits for user {username}: {new_credits}")
-
-            if cursor.rowcount > 0:
-                logging.info(f"Credits for user {username} updated successfully.")
-                return "Success"
-            else:
-                logging.warning(f"Credits for user {username} not updated.")
-                return f"Credits for user {username} not updated."
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-        conn.rollback()
-        return f"Database error: {e}"
-    finally:
-        set_database_status('idle')
-
+    return "Success"
+    
 def get_user_role(username):
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT role FROM users WHERE username = ?", (username,))
-            result = cursor.fetchone()
-            if result:
-                return result[0]
+        redis_client = get_redis_client()
+
+        # Check if the user exists in Redis by checking if the user's hash exists
+        user_data_key = username
+        if redis_client.exists(user_data_key):
+            # Fetch the user's role from the Redis hash
+            role = redis_client.hget(user_data_key, "role")
+            if role:
+                return role.decode('utf-8')  # Decode byte string to string
             else:
                 return None
-    except sqlite3.Error as e:
-        logging.error(f"Database error during role check: {e}")
+        else:
+            return None
+    except Exception as e:
+        app_logger.error(f"Error during role check for user {username}: {e}")
         return None
 
+import json
+from datetime import datetime
+
 def remove_expired_tokens():
-    if not check_and_set_busy('remove_expired_tokens'):
-        return
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM issued_tokens WHERE expires_at <= datetime('now')")
-            cursor.execute("DELETE FROM revoked_tokens WHERE expires_at <= datetime('now')")
-            conn.commit()
-            logging.info("Expired tokens removed successfully.")
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-    set_database_status('idle')
+        redis_client = get_redis_client()
+
+        # Global keys for issued and revoked tokens (sets)
+        issued_tokens_key = "issued_tokens"
+        revoked_tokens_key = "revoked_tokens"
+
+        # Get all tokens from the global sets
+        issued_tokens = redis_client.smembers(issued_tokens_key)
+        revoked_tokens = redis_client.smembers(revoked_tokens_key)
+
+        # Get the current time
+        current_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+
+        # Function to remove expired tokens
+        def remove_expired_from_set(tokens, set_key):
+            for token in tokens:
+                try:
+                    # Decode the token from the set
+                    token_data = json.loads(token.decode('utf-8'))
+                    expires_at = token_data.get('expires_at')
+
+                    if expires_at and expires_at <= current_time:
+                        # If token has expired, remove it from the set
+                        redis_client.srem(set_key, token)
+                        app_logger.debug(f"Removed expired token {token_data['jti']} from {set_key}.")
+
+                except Exception as e:
+                    app_logger.error(f"Error processing token {token} in {set_key}: {str(e)}")
+
+        # Remove expired tokens from both sets
+        remove_expired_from_set(issued_tokens, issued_tokens_key)
+        remove_expired_from_set(revoked_tokens, revoked_tokens_key)
+
+        app_logger.info("Expired tokens removed successfully.")
+
+    except Exception as e:
+        app_logger.error(f"Error removing expired tokens: {str(e)}")
 
 def get_clients():
-    if not check_and_set_busy('get_clients'):
-        return
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM limits")
-            clients = cursor.fetchall()
-            if clients:
-                for client in clients:
-                    print(f"User ID: {client[0]}")
-                    print(f"Daily Limit: {client[1]}")
-                    print(f"Hourly Limit: {client[2]}")
-                    print(f"Minute Limit: {client[3]}")
-                    print("\n" + "-"*40 + "\n")
-            else:
-                print("No clients found.")
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-    set_database_status('idle')
+        redis_client = get_redis_client()
+
+        # You may have a pattern or key prefix for the clients' limits in Redis, e.g., "username:limits"
+        # Assuming client limits are stored as hashes under keys like "username:limits"
+        # Use Redis keys pattern to get all user limit keys
+        client_keys = redis_client.keys("*:limits")  # This will match keys like 'username:limits'
+
+        if client_keys:
+            for client_key in client_keys:
+                username = client_key.decode('utf-8').split(":")[0]  # Extract username from the key
+
+                # Fetch client limits from Redis (stored as hash)
+                client_limits = redis_client.hgetall(client_key)
+                client_limits = decode_redis_values(client_limits)  # Decode byte strings if necessary
+
+                # Print client details
+                daily_limit = client_limits.get('daily_limit', 'N/A')
+                hourly_limit = client_limits.get('hourly_limit', 'N/A')
+                minute_limit = client_limits.get('minute_limit', 'N/A')
+
+                print(f"Username: {username}")
+                print(f"Daily Limit: {daily_limit}")
+                print(f"Hourly Limit: {hourly_limit}")
+                print(f"Minute Limit: {minute_limit}")
+                print("\n" + "-"*40 + "\n")
+        else:
+            print("No clients found.")
+    except redis_exceptions.ConnectionError as e:
+        print(f"Redis connection error: {str(e)}")
+    except Exception as e:
+        print(f"Error fetching clients: {str(e)}")
 
 def get_limits():
-    if not check_and_set_busy('get_limits'):
-        return
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT user_id, daily_limit, hourly_limit, minute_limit FROM limits")
-            limits = cursor.fetchall()
-            if limits:
-                print(f"{'User ID':<20} {'Daily Limit':<12} {'Hourly Limit':<12} {'Minute Limit':<12}")
-                for limit in limits:
-                    print(f"{limit[0]:<20} {limit[1]:<12} {limit[2]:<12} {limit[3]:<12}")
-            else:
-                print("No limits found.")
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-    set_database_status('idle')
+        redis_client = get_redis_client()
+
+        # Get all keys that match the pattern "username:limits"
+        limit_keys = redis_client.keys('*:limits')  # This assumes that keys are named like "username:limits"
+
+        if limit_keys:
+            print(f"{'Username':<20} {'Daily Limit':<12} {'Hourly Limit':<12} {'Minute Limit':<12}")
+            for key in limit_keys:
+                username = key.decode('utf-8').split(":")[0]  # Extract username from key
+
+                # Fetch the limits data for each user from Redis (stored as hash)
+                limits = redis_client.hgetall(key)
+                limits = decode_redis_values(limits)  # Decode byte strings if necessary
+
+                daily_limit = limits.get('daily_limit', 'N/A')
+                hourly_limit = limits.get('hourly_limit', 'N/A')
+                minute_limit = limits.get('minute_limit', 'N/A')
+
+                # Print the limits
+                print(f"{username:<20} {daily_limit:<12} {hourly_limit:<12} {minute_limit:<12}")
+        else:
+            print("No limits found.")
+
+    except redis_exceptions.ConnectionError as e:
+        print(f"Redis connection error: {str(e)}")
+    except Exception as e:
+        print(f"Error fetching limits: {str(e)}")
 
 def set_limits():
-    if not check_and_set_busy('set_limits'):
-        return
     try:
-        user_id = input("Enter user ID: ")
+        # Get user input for limits
+        username = input("Enter username: ")
         daily_limit = int(input("Enter daily limit: "))
         hourly_limit = int(input("Enter hourly limit: "))
         minute_limit = int(input("Enter minute limit: "))
 
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                UPDATE limits
-                SET daily_limit = ?, hourly_limit = ?, minute_limit = ?
-                WHERE user_id = ?
-            """, (daily_limit, hourly_limit, minute_limit, user_id))
-            conn.commit()
+        redis_client = get_redis_client()
 
-            if cursor.rowcount > 0:
-                print(f"Limits for user {user_id} updated successfully.")
-                logging.info(f"Limits for user {user_id} updated to Daily: {daily_limit}, Hourly: {hourly_limit}, Minute: {minute_limit}")
-            else:
-                print(f"User {user_id} not found.")
-                logging.warning(f"User {user_id} not found when trying to update limits.")
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
+        # Define the key for storing limits in Redis as a hash
+        limits_key = f"{username}:limits"
+
+        # Set the limits in Redis
+        redis_client.hset(limits_key, "daily_limit", daily_limit)
+        redis_client.hset(limits_key, "hourly_limit", hourly_limit)
+        redis_client.hset(limits_key, "minute_limit", minute_limit)
+
+        print(f"Limits for user {username} updated successfully.")
+        logging.info(f"Limits for user {username} updated to Daily: {daily_limit}, Hourly: {hourly_limit}, Minute: {minute_limit}")
+
+    except redis_exceptions.ConnectionError as e:
+        print(f"Redis connection error: {str(e)}")
+        logging.error(f"Redis connection error: {str(e)}")
     except ValueError:
-        logging.error("Invalid input. Please enter numeric values for limits.")
         print("Invalid input. Please enter numeric values for limits.")
-    set_database_status('idle')
+        logging.error("Invalid input. Please enter numeric values for limits.")
+    except Exception as e:
+        print(f"Error updating limits: {str(e)}")
+        logging.error(f"Error updating limits: {str(e)}")
+
 
 def is_token_expired(token):
     try:
@@ -1059,174 +859,178 @@ def login_admin_user():
     return response
 
 def suspend_user(username):
-    if not check_and_set_busy('suspend_user'):
-        return
+    redis_client = get_redis_client()
 
-    if not user_exists(username):
+    # Check if the user exists in Redis
+    user_data_key = username
+    if not redis_client.exists(user_data_key):
         logging.warning(f"User {username} does not exist.")
         set_database_status('idle')
         return
 
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE users SET user_status = 'suspended' WHERE username = ?", (username,))
-            conn.commit()
-            if cursor.rowcount > 0:
-                logging.info(f"User {username} suspended successfully.")
-                # Update cache
-                suspend_user_cache(username)
-            else:
-                logging.warning(f"User {username} not suspended.")
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-    set_database_status('idle')
+        # Suspend the user by setting their 'user_status' to 'suspended' in Redis
+        redis_client.hset(user_data_key, 'user_status', 'suspended')
+        logging.info(f"User {username} suspended successfully.")
+
+        # Update cache if necessary (you can implement suspend_user_cache logic as needed)
+        suspend_user_cache(username)
+        
+    except redis_exceptions.ConnectionError as e:
+        logging.error(f"Redis connection error: {str(e)}")
+    except Exception as e:
+        logging.error(f"Error suspending user {username}: {str(e)}")
 
 def unsuspend_user(username):
-    if not check_and_set_busy('unsuspend_user'):
-        return
+    redis_client = get_redis_client()
 
-    if not user_exists(username):
+    # Check if the user exists in Redis
+    user_data_key = username
+    if not redis_client.exists(user_data_key):
         logging.warning(f"User {username} does not exist.")
         set_database_status('idle')
         return
 
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE users SET user_status = 'active' WHERE username = ?", (username,))
-            conn.commit()
-            if cursor.rowcount > 0:
-                logging.info(f"User {username} unsuspended successfully.")
-                # Update cache
-                unsuspend_user_cache(username)
-            else:
-                logging.warning(f"User {username} not unsuspended.")
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-    set_database_status('idle')
+        # Unsuspend the user by setting their 'user_status' to 'active' in Redis
+        redis_client.hset(user_data_key, 'user_status', 'active')
+        logging.info(f"User {username} unsuspended successfully.")
+
+        # Update cache if necessary (you can implement unsuspend_user_cache logic as needed)
+        unsuspend_user_cache(username)
+
+    except redis_exceptions.ConnectionError as e:
+        logging.error(f"Redis connection error: {str(e)}")
+    except Exception as e:
+        logging.error(f"Error unsuspending user {username}: {str(e)}")
 
 def list_user_transactions(username):
-    if not check_and_set_busy('list_user_transactions'):
-        return
+    redis_client = get_redis_client()
 
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT change_date, amount, source, transaction_id
-                FROM credit_changes
-                WHERE user_id = ?
-                ORDER BY change_date DESC
-            """, (username,))
-            transactions = cursor.fetchall()
-            if transactions:
-                print(f"{'Change Date':<20} {'Amount':>10} {'Source':<40} {'Transaction ID':<15}")
-                print("-" * 85)
-                for transaction in transactions:
-                    try:
-                        change_date = datetime.strptime(transaction[0], "%Y-%m-%d %H:%M:%S.%f").strftime("%Y-%m-%d %H:%M:%S")
-                    except ValueError:
-                        change_date = datetime.strptime(transaction[0], "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
-                    amount = f"{transaction[1]:>10}"  # Right-align the amount, including negative values
-                    source = f"{transaction[2]:<40}"  # Left-align the source with more space
-                    transaction_id = f"{transaction[3]:<15}"  # Left-align the transaction ID with fixed width
-                    print(f"{change_date:<20} {amount} {source} {transaction_id}")
-            else:
-                print(f"No transactions found for user {username}.")
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-    set_database_status('idle')
+        # Define the Redis key for the user's transactions (e.g., a list)
+        user_transactions_key = f"{username}:credit_changes"
 
-def revoke_tokens(username, token_type='all', conn=None, lock=True):
-    logging.info(f"Revoking {token_type} tokens for user {username}.")
-    if lock and not check_and_set_busy('revoke_tokens'):
-        return
+        # Fetch all transactions for the user (assuming the data is stored in a list)
+        transactions = redis_client.lrange(user_transactions_key, 0, -1)
 
-    try:
-        # Use existing connection if provided, else create a new one
-        use_conn = conn if conn else get_db_connection()
-        with use_conn:
-            cursor = use_conn.cursor()
-            cursor.execute("SELECT jwt FROM issued_tokens WHERE username = ?", (username,))
-            tokens = cursor.fetchall()
+        if transactions:
+            print(f"{'Change Date':<20} {'Amount':>10} {'Source':<40} {'Transaction ID':<15}")
+            print("-" * 85)
 
-            # Filter tokens based on the decoded 'type' claim
-            tokens_to_revoke = []
-            for token in tokens:
-                jwt_token = token[0]
+            # Iterate over each transaction, assuming each entry is JSON-formatted
+            for transaction in transactions:
                 try:
-                    decoded = jwt.decode(jwt_token.encode(), JWT_SECRET_KEY, algorithms=['HS256'])
-                    if token_type == 'all' or decoded.get('type') == token_type:
-                        tokens_to_revoke.append((decoded['jti'], username, jwt_token, datetime.fromtimestamp(decoded['exp']), 'admin'))
-                except jwt.ExpiredSignatureError:
-                    logging.warning(f"Token for user {username} has expired and will not be revoked.")
+                    # Deserialize the transaction data from JSON (assuming it's stored as a JSON string)
+                    transaction_data = json.loads(transaction.decode('utf-8'))
 
-            # Log the number of tokens found
-            num_tokens = len(tokens_to_revoke)
-            logging.info(f"Found {num_tokens} {token_type} tokens for user {username} to revoke.")
+                    change_date = transaction_data.get('change_date', 'N/A')
+                    amount = transaction_data.get('amount', 0)
+                    source = transaction_data.get('source', '')
+                    transaction_id = transaction_data.get('transaction_id', '')
 
-            for token in tokens_to_revoke:
-                cursor.execute("""
-                    INSERT INTO revoked_tokens (jti, username, jwt, expires_at, reason)
-                    VALUES (?, ?, ?, ?, ?)
-                """, token)
-                cursor.execute("DELETE FROM issued_tokens WHERE jti = ?", (token[0],))
+                    # Format and print the transaction data
+                    print(f"{change_date:<20} {amount:>10} {source:<40} {transaction_id:<15}")
+                
+                except json.JSONDecodeError as e:
+                    logging.error(f"Error decoding transaction data for {username}: {str(e)}")
+                    print(f"Error decoding transaction data.")
+        else:
+            print(f"No transactions found for user {username}.")
+    except redis_exceptions.ConnectionError as e:
+        logging.error(f"Redis connection error: {str(e)}")
+    except Exception as e:
+        logging.error(f"Error fetching transactions for user {username}: {str(e)}")
 
-            use_conn.commit()
-            logging.info(f"{num_tokens} tokens for user {username} revoked successfully.")
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-    finally:
-        if lock:
-            set_database_status('idle')
-
-def remove_user_transactions(username):
-    logging.info(f"Attempting to remove all transactions for user {username}.")
-    if not check_and_set_busy('remove_user_transactions'):
-        return "Operation could not be started. System is busy."
-
+def revoke_tokens(username, token_type='all', redis_client=None, lock=True):
+    logging.info(f"Revoking {token_type} tokens for user {username}.")
+    
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
+        # Use provided Redis client or get a new one
+        redis_client = redis_client if redis_client else get_redis_client()
 
-            # Delete all transactions for the user
-            cursor.execute("DELETE FROM credit_changes WHERE user_id = ?", (username,))
-            conn.commit()
+        # Define the global Redis keys for issued and revoked tokens
+        issued_tokens_key = "issued_tokens"
+        revoked_tokens_key = "revoked_tokens"
 
+        # Fetch all issued tokens for the user from Redis (assuming they are stored as JSON in a set)
+        tokens = redis_client.smembers(f"{issued_tokens_key}:{username}")
+        
+        # Filter tokens based on the decoded 'type' claim
+        tokens_to_revoke = []
+        for token in tokens:
+            try:
+                token_data = json.loads(token.decode('utf-8'))  # Decode byte string to JSON
+                jwt_token = token_data['jwt']
+                decoded = decode_jwt(jwt_token, JWT_SECRET_KEY, allow_expired=True)
+                
+                if token_type == 'all' or decoded.get('type') == token_type:
+                    tokens_to_revoke.append((token_data['jti'], username, jwt_token, datetime.fromtimestamp(decoded.get('exp')), 'admin'))
+            except jwt.ExpiredSignatureError:
+                logging.warning(f"Token for user {username} has expired and will not be revoked.")
+            except Exception as e:
+                logging.error(f"Error decoding token for user {username}: {str(e)}")
+
+        # Log the number of tokens found
+        num_tokens = len(tokens_to_revoke)
+        logging.info(f"Found {num_tokens} {token_type} tokens for user {username} to revoke.")
+
+        # Revoke the tokens by adding them to the revoked tokens set and removing from the issued set
+        for token in tokens_to_revoke:
+            redis_client.sadd(revoked_tokens_key, json.dumps({
+                'jti': token[0],
+                'username': token[1],
+                'jwt': token[2],
+                'expires_at': token[3].strftime('%Y-%m-%d %H:%M:%S'),
+                'reason': token[4]
+            }))
+            redis_client.srem(f"{issued_tokens_key}:{username}", token[2])  # Remove token from issued set
+
+        logging.info(f"{num_tokens} tokens for user {username} revoked successfully.")
+    
+    except Exception as e:
+        logging.error(f"Error revoking tokens for user {username}: {str(e)}")
+ 
+def remove_user_transactions(username, redis_client=None):
+    logging.info(f"Attempting to remove all transactions for user {username}.")
+    try:
+        # Use provided Redis client or get a new one
+        redis_client = redis_client if redis_client else get_redis_client()
+
+        # Define the Redis key pattern for the user's transactions
+        transactions_key = f"user:{username}:transactions"
+
+        # Check if the key exists
+        if redis_client.exists(transactions_key):
+            # Delete the user's transactions from Redis (if it's a list or set)
+            redis_client.delete(transactions_key)
             logging.info(f"All transactions for user {username} have been removed.")
+            return "Success"
+        else:
+            logging.warning(f"No transactions found for user {username}.")
+            return f"No transactions found for user {username}."
 
-            if cursor.rowcount > 0:
-                logging.info(f"Transactions for user {username} removed successfully.")
-                return "Success"
-            else:
-                logging.warning(f"No transactions found for user {username}.")
-                return f"No transactions found for user {username}."
+    except redis_exceptions.ConnectionError as e:
+        logging.error(f"Redis connection error: {e}")
+        return f"Redis connection error: {e}"
 
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-        conn.rollback()
-        return f"Database error: {e}"
+    except Exception as e:
+        logging.error(f"Error removing transactions for user {username}: {e}")
+        return f"Error removing transactions for user {username}: {e}"
 
-    finally:
-        set_database_status('idle')
 
 def interactive_help():
     actions = [
         "Add User",
-        "Reset Schema",
         "Remove User",
         "List Users",
         "Change Password",
-        "Backup Database",
-        "Restore Database",
         "List Tokens",
         "Change User Role",
         "Change User Credits",
         "Remove Expired Tokens",
         "Get Limits",
         "Set Limits",
-        "Persist Client Data",
         "Suspend User",
         "Unsuspend User",
         "List User Transactions",
@@ -1234,16 +1038,13 @@ def interactive_help():
         "Secure User Account",
         "Initialize Cache",
         "Print Cache Contents",
-        "Reset Database Status",
         "Remove User Transactions",
-        "Reset Klaviyo Status",
-        "Display Klaviyo Status",
         "Display Discoveries Records",
         "Remove Klaviyo Discovery Records",
         "Create Staging Files",
         "View Community Payloads",  # View Redis payloads
         "Delete Community Payloads",  # Delete Redis payloads
-        "Export Community Payloads to JSON",  # New action to export payloads
+        "Export Community Payloads to JSON",  # Export payloads
         "Exit"
     ]
 
@@ -1264,28 +1065,22 @@ def interactive_help():
             role = input("Enter role (admin/client) [client]: ") or 'client'
             add_user(username, password, role)
         elif choice == 2:
-            drop_and_create_tables()
-        elif choice == 3:
             username = input("Enter username to remove: ")
             remove_user(username)
-        elif choice == 4:
+        elif choice == 3:
             list_users()
-        elif choice == 5:
+        elif choice == 4:
             username = input("Enter username: ")
             new_password = input("Enter new password: ")
             change_password(username, new_password)
-        elif choice == 6:
-            backup_database()
-        elif choice == 7:
-            restore_database()
-        elif choice == 8:
+        elif choice == 5:
             username = input("Enter username: ")
             list_tokens(username)
-        elif choice == 9:
+        elif choice == 6:
             username = input("Enter username: ")
             new_role = input("Enter new role (admin/client): ")
             change_user_role(username, new_role)
-        elif choice == 10:
+        elif choice == 7:
             username = input("Enter username: ")
             action = input("Do you want to add or remove credits? (add/remove): ").strip().lower()
             if action in ['add', 'remove']:
@@ -1298,36 +1093,32 @@ def interactive_help():
                     print("Invalid number of credits. Please enter an integer.")
             else:
                 print("Invalid action. Please enter 'add' or 'remove'.")
-        elif choice == 11:
+        elif choice == 8:
             remove_expired_tokens()
-        elif choice == 12:
+        elif choice == 9:
             get_limits()
-        elif choice == 13:
+        elif choice == 10:
             set_limits()
-        elif choice == 14:
-            persist_client_data()
-        elif choice == 15:
+        elif choice == 11:
             username = input("Enter username to suspend: ")
             suspend_user(username)
-        elif choice == 16:
+        elif choice == 12:
             username = input("Enter username to unsuspend: ")
             unsuspend_user(username)
-        elif choice == 17:
+        elif choice == 13:
             username = input("Enter username to list transactions: ")
             list_user_transactions(username)
-        elif choice == 18:
+        elif choice == 14:
             username = input("Enter username to revoke tokens: ")
             revoke_tokens(username)
-        elif choice == 19:
+        elif choice == 15:
             secure_user_account()
-        elif choice == 20:
+        elif choice == 16:
             result = initialize_cache()
             print(result)
-        elif choice == 21:
+        elif choice == 17:
             print_cache_contents()
-        elif choice == 22:
-            reset_database_status()
-        elif choice == 23:
+        elif choice == 18:
             username = input("Enter username to remove transactions: ")
             confirm = input(f"Are you sure you want to remove all transactions for {username}? (yes/no): ").strip().lower()
             if confirm == 'yes':
@@ -1338,20 +1129,16 @@ def interactive_help():
                     print(f"All transactions for user {username} have been removed.")
             else:
                 print("Operation canceled.")
-        elif choice == 24:
-            username = input("Enter username to reset Klaviyo status: ")
-        elif choice == 25:
-            username = input("Enter username to display Klaviyo status: ")
-        elif choice == 26:
+        elif choice == 19:
             username = input("Enter username to display discoveries records: ")
             display_discoveries_records(username)
-        elif choice == 27:
+        elif choice == 20:
             username = input("Enter username to remove Klaviyo discovery records: ")
             remove_klaviyo_discoveries(username)
-        elif choice == 28:
+        elif choice == 21:
             username = input("Enter username to create staging files: ")
             create_stage_csv_files(username)
-        elif choice == 29:
+        elif choice == 22:
             limit = input("Enter the number of community payloads to view (default 10): ")
             limit = int(limit) if limit.isdigit() else 10
             payloads = view_community_payloads(limit)
@@ -1364,28 +1151,26 @@ def interactive_help():
                     for field, val in value.items():
                         print(f"  {field.decode('utf-8')}: {val.decode('utf-8')}")
                     print("\n")
-        elif choice == 30:
+        elif choice == 23:
             confirm = input("Are you sure you want to delete all community payloads? (yes/no): ").strip().lower()
             if confirm == 'yes':
                 deleted_keys = delete_community_payloads()
                 print(f"Deleted {len(deleted_keys)} keys.")
             else:
                 print("Operation canceled.")
-        elif choice == 31:  # Export community payloads to JSON
+        elif choice == 24:  # Export community payloads to JSON
             username = input("Enter username for exporting payloads: ")
             export_result = export_community_payloads_to_json(username)
             # Parse the JSON string into a dictionary
             export_result_dict = json.loads(export_result)
             print(f"Exported {export_result_dict['payload_count']} payloads to file: {export_result_dict['file_path']}")
-        elif choice == 32:
+        elif choice == 25:
             print("Exiting...")
             break
         else:
             print("Invalid choice. Please select a valid option.")
 
-
 if __name__ == "__main__":
-    initialize_tables()
 
     parser = argparse.ArgumentParser(description="Manage users, database schema, and scheduled tasks")
     parser.add_argument('--clear-discover-klaviyo-status', metavar='username', help="Clear Discover Klaviyo status for a user")
@@ -1437,9 +1222,9 @@ if __name__ == "__main__":
         print(f"Export complete. Payloads exported: {export_result['num_payloads']}")
         print(f"File location: {export_result['file_path']}")
     elif args.clear_discover_klaviyo_status:
-        print("Coming soon")
+        print("Not needed")
     elif args.display_klaviyo_status:
-        print("Coming soon")
+        print("Not needed")
     elif args.init_tables:
         initialize_tables()
     elif args.add_user:
@@ -1453,9 +1238,9 @@ if __name__ == "__main__":
     elif args.change_password:
         change_password(*args.change_password)
     elif args.backup_db:
-        backup_database()
+         print("Not needed")
     elif args.restore_db:
-        restore_database()
+         print("Not needed")
     elif args.list_tokens:
         list_tokens(args.list_tokens)
     elif args.change_role:

@@ -251,22 +251,6 @@ def stripe_webhook_function():
 
     return jsonify({'status': 'success'}), 200
 
-def revoke_all_tokens_for_user(username):
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT jti, jwt, expires_at FROM issued_tokens WHERE username = ?", (username,))
-            tokens = cursor.fetchall()
-
-            for (jti, jwt, expires_at) in tokens:
-                add_revoked_token_function(jti, username, jwt, expires_at, conn)
-                cursor.execute("DELETE FROM issued_tokens WHERE jti = ?", (jti,))
-
-            conn.commit()
-            app_logger.debug(f"Revoked all tokens for user: {username}")
-    except Exception as e:
-        app_logger.error(f"Error revoking tokens for user {username}: {str(e)}")
-
 def create_tokens(username, role, daily_limit, hourly_limit, minute_limit, secret, access_expires, refresh_expires, check_existing_refresh=False):
     secret = str(secret)
     app_logger.debug(f"Secret key type in create_tokens: {type(secret)} {secret}")
@@ -279,33 +263,46 @@ def create_tokens(username, role, daily_limit, hourly_limit, minute_limit, secre
     }
 
     try:
-        with get_db_connection() as conn:
-            revoke_all_access_tokens_for_user(username, secret, conn)
+        redis_client = get_redis_client()
 
-            access_token = create_access_token(identity=username, additional_claims=additional_claims)
-            app_logger.debug(f"Created access token for user {username}")
+        # Revoke all existing access tokens from the global Redis set (not per user)
+        revoke_all_access_tokens_for_user(username, secret)
 
-            refresh_token = None
-            if check_existing_refresh:
-                cursor = conn.cursor()
-                cursor.execute("SELECT jwt FROM issued_tokens WHERE username = ? AND type = 'refresh' AND expires_at > datetime('now')", (username,))
-                existing_refresh_token = cursor.fetchone()
-                if existing_refresh_token:
-                    refresh_token = existing_refresh_token[0]
-                    app_logger.debug(f"Found existing refresh token for user {username}")
+        # Create a new access token
+        access_token = create_access_token(identity=username, additional_claims=additional_claims)
+        app_logger.debug(f"Created access token for user {username}")
 
-            if not refresh_token:
-                refresh_token = create_refresh_token(identity=username, additional_claims=additional_claims)
-                app_logger.debug(f"Created new refresh token for user {username}")
+        # Check if there is an existing refresh token in Redis
+        refresh_token = None
+        if check_existing_refresh:
+            # Look for an existing refresh token in the global issued tokens set
+            existing_refresh_token = redis_client.sismember("issued_tokens", username)
+            if existing_refresh_token:
+                refresh_token = existing_refresh_token
+                app_logger.debug(f"Found existing refresh token for user {username}")
 
-            decoded_access_token = decode_jwt(access_token, secret)
-            decoded_refresh_token = decode_jwt(refresh_token, secret)
-            access_jti = decoded_access_token["jti"]
-            refresh_jti = decoded_refresh_token["jti"]
+        # If no existing refresh token, create a new one
+        if not refresh_token:
+            refresh_token = create_refresh_token(identity=username, additional_claims=additional_claims)
+            app_logger.debug(f"Created new refresh token for user {username}")
 
-            add_issued_token_function(access_jti, username, access_token, datetime.datetime.utcnow() + access_expires, 'access', conn)
-            if not existing_refresh_token:
-                add_issued_token_function(refresh_jti, username, refresh_token, datetime.datetime.utcnow() + refresh_expires, 'refresh', conn)
+        # Decode the access and refresh tokens to get their JTI (JWT ID)
+        decoded_access_token = decode_jwt(access_token, secret)
+        decoded_refresh_token = decode_jwt(refresh_token, secret)
+
+        access_jti = decoded_access_token["jti"]
+        refresh_jti = decoded_refresh_token["jti"]
+
+        # Convert the expiry times to string format before adding to Redis
+        access_expiry_str = (datetime.datetime.utcnow() + access_expires).isoformat()
+        refresh_expiry_str = (datetime.datetime.utcnow() + refresh_expires).isoformat()
+
+        # Add the issued access and refresh tokens to the global Redis set for issued tokens
+        # Use the global issued tokens key (set of all issued tokens)
+        add_issued_token_function(access_jti, username, access_token, access_expiry_str, 'access', redis_client)
+        
+        if not existing_refresh_token:
+            add_issued_token_function(refresh_jti, username, refresh_token, refresh_expiry_str, 'refresh', redis_client)
 
     except Exception as e:
         app_logger.error(f"Error during token creation for user {username}: {str(e)}")

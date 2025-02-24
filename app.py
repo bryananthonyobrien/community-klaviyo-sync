@@ -126,18 +126,34 @@ def datetime_converter(o):
 db_lock = threading.Lock()
 clients_lock = threading.Lock()
 
-# Fetch user-specific rate limits from the database
-def fetch_rate_limit_from_db(user_id):
-    app_logger.debug(f"Fetching rate limits from database for user {user_id}")
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT daily_limit, hourly_limit, minute_limit FROM limits WHERE user_id = ?", (user_id,))
-        result = cursor.fetchone()
-        app_logger.debug(f"Fetched rate limits for user {user_id}: {result}")
-        if result:
-            return result
-        return None
+# Fetch user-specific rate limits from Redis
+def fetch_rate_limit_from_redis(user_id):
+    app_logger.debug(f"Fetching rate limits from Redis for user {user_id}")
 
+    # Connect to Redis
+    redis_client = Redis(
+        host=app.config['REDIS_HOST'],
+        port=app.config['REDIS_PORT'],
+        password=app.config['REDIS_PASSWORD'],
+        db=app.config['REDIS_DB']
+    )
+
+    # Define the Redis key for the user's rate limits
+    limits_key = f"{user_id}:limits"
+    
+    # Fetch all fields of the hash for the given user
+    limits = redis_client.hgetall(limits_key)  # Fetch all fields of the hash
+
+    if limits:
+        # Decode byte values to strings and convert them to integers
+        limits = {key.decode('utf-8'): int(value) for key, value in limits.items()}
+        app_logger.debug(f"Fetched rate limits for user {user_id}: {limits}")
+        return limits
+
+    # If no limits are found, return None
+    app_logger.debug(f"No rate limits found for user {user_id}")
+    return None
+    
 # Dynamically determine rate limits
 def get_dynamic_rate_limit():
     user_identity = get_jwt_identity()
@@ -163,26 +179,37 @@ def check_if_token_revoked(jwt_header, jwt_payload):
     jti = jwt_payload['jti']
     return is_token_revoked(jti)
 
+# Fetch jti and username from Redis (global issued_tokens set)
 def get_jti_and_username(jti):
     try:
-        with get_db_connection() as conn:
-            # app_logger.debug("Entering with block in get_jti_and_username")
-            cursor = conn.cursor()
-            cursor.execute("SELECT username FROM issued_tokens WHERE jti = ?", (jti,))
-            result = cursor.fetchone()
-            # app_logger.debug("Exiting with block in get_jti_and_username")
-            if result:
-                return jti, result[0]
-            return None, None
-    except sqlite3.OperationalError as e:
-        app_logger.error(f"OperationalError in get_jti_and_username: {str(e)}")
-        if 'no such table' in str(e):
-            app_logger.error(f"Missing table detected: {str(e)}")
-            return None, None
-    except Exception as e:
-        app_logger.error(f"Error getting jti and username: {str(e)}")
+        # Connect to Redis
+        redis_client = Redis(
+            host=app.config['REDIS_HOST'],
+            port=app.config['REDIS_PORT'],
+            password=app.config['REDIS_PASSWORD'],
+            db=app.config['REDIS_DB']
+        )
+        
+        # Define the Redis key for the global issued_tokens set
+        issued_tokens_key = "issued_tokens"
+
+        # Fetch the token data for the given jti from the global set
+        token_data = redis_client.hget(issued_tokens_key, jti)
+
+        if token_data:
+            # Decode the byte value and parse JSON string to dictionary
+            token_data = token_data.decode('utf-8')
+            token_dict = json.loads(token_data)
+            
+            # Return the jti and associated username
+            return jti, token_dict.get("username")
+        
         return None, None
 
+    except Exception as e:
+        app_logger.error(f"Error getting jti and username from Redis: {str(e)}")
+        return None, None
+        
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -209,22 +236,6 @@ def payment_success():
 def cancel():
     # Handle cancelled payment
     return cancel_payment_function()
-
-def revoke_all_tokens_for_user(username):
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT jti, jwt, expires_at FROM issued_tokens WHERE username = ?", (username,))
-            tokens = cursor.fetchall()
-
-            for (jti, jwt, expires_at) in tokens:
-                add_revoked_token_function(jti, username, jwt, expires_at, conn)
-                cursor.execute("DELETE FROM issued_tokens WHERE jti = ?", (jti,))
-
-            conn.commit()
-            app_logger.debug(f"Revoked all tokens for user: {username}")
-    except Exception as e:
-        app_logger.error(f"Error revoking tokens for user {username}: {str(e)}")
 
 import sys  # Ensure this is imported
 
@@ -3443,110 +3454,118 @@ def refresh():
     try:
         current_user = get_jwt_identity()
 
-        # Retrieve the user's role, credits, and limits from the database
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT role, credits FROM users WHERE username = ?", (current_user,))
-            user_result = cursor.fetchone()
-            if user_result is None:
-                return jsonify({"msg": "User does not exist"}), 404
+        # Connect to Redis
+        redis_client = Redis(
+            host=app.config['REDIS_HOST'],
+            port=app.config['REDIS_PORT'],
+            password=app.config['REDIS_PASSWORD'],
+            db=app.config['REDIS_DB']
+        )
 
-            role, credits = user_result
+        # Retrieve the user's role, credits, and limits from Redis
+        user_data = redis_client.hgetall(f"{current_user}")
+        if not user_data:
+            return jsonify({"msg": "User does not exist"}), 404
 
-            cursor.execute("SELECT daily_limit, hourly_limit, minute_limit FROM limits WHERE user_id = ?", (current_user,))
-            limits_result = cursor.fetchone()
-            if limits_result:
-                daily_limit, hourly_limit, minute_limit = limits_result
-            else:
-                daily_limit = DEFAULT_DAILY_LIMIT
-                hourly_limit = DEFAULT_HOURLY_LIMIT
-                minute_limit = DEFAULT_MINUTE_LIMIT
+        role = user_data.get('role', b'client').decode('utf-8')  # Default to 'client'
+        credits = int(user_data.get('credits', 0))
+
+        # Retrieve the user's limits from Redis (assuming limits are stored under a key like "username:limits")
+        limits_data = redis_client.hgetall(f"{current_user}:limits")
+        if limits_data:
+            daily_limit = int(limits_data.get('daily_limit', DEFAULT_DAILY_LIMIT))
+            hourly_limit = int(limits_data.get('hourly_limit', DEFAULT_HOURLY_LIMIT))
+            minute_limit = int(limits_data.get('minute_limit', DEFAULT_MINUTE_LIMIT))
+        else:
+            daily_limit = DEFAULT_DAILY_LIMIT
+            hourly_limit = DEFAULT_HOURLY_LIMIT
+            minute_limit = DEFAULT_MINUTE_LIMIT
 
         # Revoke any existing access tokens before creating new ones
-        with get_db_connection() as conn:
-            app_logger.info(f"refresh: JWT_SECRET_KEY set: {app.config['JWT_SECRET_KEY']}")
-            revoke_all_access_tokens_for_user(current_user, app.config['JWT_SECRET_KEY'], conn)
+        revoke_all_access_tokens_for_user(current_user, app.config['JWT_SECRET_KEY'], redis_client)
 
-        access_token, refresh_token = create_tokens(current_user, role, daily_limit, hourly_limit, minute_limit, str(app.config['JWT_SECRET_KEY']), app.config['JWT_ACCESS_TOKEN_EXPIRES'], app.config['JWT_REFRESH_TOKEN_EXPIRES'],check_existing_refresh=True)
+        # Generate new tokens
+        access_token, refresh_token = create_tokens(current_user, role, daily_limit, hourly_limit, minute_limit,
+                                                     str(app.config['JWT_SECRET_KEY']), app.config['JWT_ACCESS_TOKEN_EXPIRES'],
+                                                     app.config['JWT_REFRESH_TOKEN_EXPIRES'], check_existing_refresh=True)
 
-        expired_tokens = []
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT jti, username, expires_at FROM issued_tokens WHERE expires_at <= datetime('now')")
-            expired_tokens = cursor.fetchall()
+        # Cleanup expired tokens
+        expired_tokens = redis_client.smembers('issued_tokens')  # Assuming you store issued tokens in a set
+        expired_tokens = [json.loads(token.decode('utf-8')) for token in expired_tokens if token_is_expired(token)]
 
-            for jti, username, expires_at in expired_tokens:
-                add_revoked_token_function(jti, username, "", expires_at, conn)
-
-            cursor.executemany("DELETE FROM issued_tokens WHERE jti = ?", [(jti,) for jti, username, expires_at in expired_tokens])
-            conn.commit()
+        # Revoke expired tokens
+        for token_data in expired_tokens:
+            add_revoked_token_function(token_data['jti'], token_data['username'], "", token_data['expires_at'], redis_client)
+            redis_client.srem('issued_tokens', token_data['jti'])  # Remove expired token from issued set
 
         return jsonify(access_token=access_token), 200
     except RateLimitExceeded as e:
         app_logger.error(f"Rate limit exceeded: {str(e)}")
         return jsonify({"error": "Rate limit exceeded", "retry_after": e.description["retry_after"]}), 429
-    except sqlite3.OperationalError as e:
-        app_logger.error(f"OperationalError during token refresh: {str(e)}")
-        if 'no such table' in str(e):
-            app_logger.error(f"Missing table detected: {str(e)}")
-            return jsonify({"error": "Internal Server Error"}), 500
     except Exception as e:
         app_logger.error(f"Error during token refresh: {str(e)}")
         app_logger.error(traceback.format_exc())
         return jsonify({"error": "Internal Server Error"}), 500
-
+        
 @app.route('/revoke', methods=['POST'])
 @jwt_required()
 def revoke():
     app_logger.debug("/revoke")
     try:
+        # Ensure the request is JSON and contains a 'username'
         if not request.is_json or request.json.get('username') is None:
             return jsonify({"msg": "Invalid request"}), 400
+        
         username = request.json.get('username')
         current_user_role = get_jwt()["role"]
 
+        # Check if the current user is an admin
         if current_user_role != "admin":
             return jsonify({"msg": "Only admins can revoke tokens"}), 403
 
         app_logger.debug(f"Revoking tokens for user: {username}")
 
-        with get_db_connection() as conn:
-            app_logger.debug("Entering with block in revoke")
-            cursor = conn.cursor()
-            app_logger.debug("Database connection opened and cursor created")
-            cursor.execute("SELECT jti, jwt, expires_at FROM issued_tokens WHERE username = ?", (username,))
-            tokens = cursor.fetchall()
-            app_logger.debug(f"Tokens fetched for user {username}: {tokens}")
+        # Connect to Redis
+        redis_client = Redis(
+            host=app.config['REDIS_HOST'],
+            port=app.config['REDIS_PORT'],
+            password=app.config['REDIS_PASSWORD'],
+            db=app.config['REDIS_DB']
+        )
 
-            if not tokens:
-                app_logger.debug(f"No tokens found for user: {username}")
-                return jsonify({"msg": f"No tokens found for user {username}"}), 404
+        # Fetch all the issued tokens for the user
+        issued_tokens_key = f"issued_tokens:{username}"
+        tokens = redis_client.smembers(issued_tokens_key)
+        if not tokens:
+            app_logger.debug(f"No tokens found for user: {username}")
+            return jsonify({"msg": f"No tokens found for user {username}"}), 404
 
-            for (jti, jwt, expires_at) in tokens:
-                try:
-                    app_logger.debug(f"Revoking token: {jti} for user: {username}")
-                    add_revoked_token_function(jti, username, jwt, expires_at, conn)
-                    app_logger.debug(f"Revoked token: {jti} for user: {username}")
-                    cursor.execute("DELETE FROM issued_tokens WHERE jti = ?", (jti,))
-                    app_logger.debug(f"Deleted token: {jti} from issued_tokens for user: {username}")
-                except Exception as e:
-                    app_logger.error(f"Error revoking token {jti} for user {username}: {str(e)}")
-                    continue
+        # Revoke all tokens for the user
+        for token in tokens:
+            try:
+                token_data = json.loads(token.decode('utf-8'))  # Assuming tokens are stored as JSON in Redis
+                jti = token_data['jti']
+                jwt_token = token_data['jwt']
+                expires_at = token_data['expires_at']
 
-            conn.commit()
-            app_logger.debug("Database changes committed")
-        app_logger.debug("Exiting with block in revoke")
+                # Add to revoked tokens list (or set) in Redis
+                add_revoked_token_function(jti, username, jwt_token, expires_at, redis_client)
+
+                # Remove the token from the issued tokens set
+                redis_client.srem(issued_tokens_key, token)
+                app_logger.debug(f"Revoked token: {jti} for user: {username}")
+
+            except Exception as e:
+                app_logger.error(f"Error revoking token for user {username}: {str(e)}")
+                continue
 
         return jsonify({"msg": f"All tokens for {username} have been revoked"}), 200
 
-    except sqlite3.OperationalError as e:
-        app_logger.error(f"Database error during revoke: {str(e)}")
-        return jsonify({"error": "Database error. Please try again later."}), 500
     except Exception as e:
         app_logger.error(f"Error during revoke: {str(e)}")
         app_logger.error(traceback.format_exc())
         return jsonify({"error": "Internal Server Error"}), 500
-
+        
 @app.route('/app', methods=['GET', 'POST'])
 @cross_origin()
 def app_route():
