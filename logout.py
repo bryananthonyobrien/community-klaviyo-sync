@@ -1,10 +1,12 @@
 import datetime
 import sqlite3
 import traceback
+import redis
 from flask import jsonify, request, session, current_app as app
 from flask_jwt_extended import get_jwt, get_jwt_identity
-from common import get_db_connection, add_revoked_token_function
+from common import get_db_connection, add_revoked_token_function, revoke_all_access_tokens_for_user
 from logs import app_logger
+from cache import get_redis_client
 
 def logout_function():
     try:
@@ -19,8 +21,10 @@ def logout_function():
         app_logger.debug(f"Access token JTI: {access_jti}")
         app_logger.debug(f"User logging out: {username} with role: {role}")
 
+        redis_client = get_redis_client()
         # Revoke the access token by adding it to the global revoked tokens set
-        revoke_all_access_tokens_for_user(username)  # Revoke any existing tokens (can be handled in the same function)
+        revoke_all_access_tokens_for_user(username, app.config['JWT_SECRET_KEY'], redis_client)
+
 
         # Add the access token to the global revoked tokens set
         add_revoked_token_function(access_jti, username, jwt_token, datetime.datetime.utcnow() + app.config['JWT_ACCESS_TOKEN_EXPIRES'], redis_client=get_redis_client())
@@ -31,7 +35,6 @@ def logout_function():
         app_logger.debug("Cleared session data")
 
         # Update user status in Redis (log out status)
-        redis_client = get_redis_client()
         redis_client.hset(username, "is_logged_in_now", 0)  # Set 'is_logged_in_now' to False in Redis
         
         app_logger.debug(f"User {username} with role {role} logged out successfully")

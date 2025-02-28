@@ -1,6 +1,6 @@
 const API_URL = window.NODE_ENV === 'production' 
   ? 'https://www.bryanworx.com' 
-  : 'http://localhost:5050';
+  : 'http://localhost:5001';
 export { API_URL };  // Ensure this export is correct
 
 console.log(API_URL); // Will log the appropriate URL based on NODE_ENV

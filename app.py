@@ -9,10 +9,11 @@ from mappings import country_mappings
 from flask import Flask, request, jsonify, render_template, redirect, url_for, session
 from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity, get_jwt
 from flask_cors import CORS, cross_origin
+from flask_talisman import Talisman
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_sslify import SSLify
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 from tenacity import retry, wait_fixed, stop_after_attempt
 from jwt import ExpiredSignatureError
 import os
@@ -54,14 +55,26 @@ def measure_time(func):
     return wrapper
 
 # Load environment variables from the specified .env file
-dotenv_path = '/home/bryananthonyobrien/mysite/.env'
+dotenv_path = find_dotenv()
 load_dotenv(dotenv_path)
 
 app = Flask(__name__, static_url_path='/static', static_folder='static', template_folder='templates')
 
 # Enable CORS for all routes
 # CORS(app, resources={r"/*": {"origins": "*"}}, methods=["GET", "POST", "DELETE", "PUT"])
-CORS(app, resources={r"/*": {"origins": ["https://www.bryanworx.com", "http://localhost:5050"]}}, methods=["GET", "POST", "DELETE", "PUT"])
+CORS(app, resources={r"/*": {"origins": ["https://www.bryanworx.com", "http://localhost:5001"]}}, methods=["GET", "POST", "DELETE", "PUT"])
+
+# Define a relaxed Content Security Policy (CSP)
+csp = {
+    'default-src': ["'self'", "https://www.bryanworx.com", "http://localhost:5050"],
+    'script-src': ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://js.stripe.com"],
+    'style-src': ["'self'", "'unsafe-inline'"],
+    'connect-src': ["'self'", "https://www.bryanworx.com", "http://localhost:5050", "https://api.stripe.com"],
+    'frame-src': ["'self'", "https://js.stripe.com"],  # Allows Stripe elements to load in an iframe
+}
+
+# Apply CSP headers to Flask using Flask-Talisman
+Talisman(app, content_security_policy=csp,force_https=False)
 
 is_loading_clients = True
 

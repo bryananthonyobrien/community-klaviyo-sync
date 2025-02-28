@@ -8,9 +8,7 @@ from redis import Redis
 from redis import exceptions as redis_exceptions
 from klaviyo import get_redis_client
 import json
-
-
-
+import datetime
 
 DATABASE_PATH = os.getenv('DATABASE_PATH', 'tokens.db')
 DEFAULT_DAILY_LIMIT = int(os.getenv('DEFAULT_DAILY_LIMIT', 200))
@@ -136,6 +134,10 @@ def add_revoked_token_function(jti, username, jwt, expires_at, redis_client=None
         # Define the key for the global revoked tokens list in Redis
         revoked_tokens_key = "revoked_tokens"  # Use the global key
 
+        # Ensure 'expires_at' is a string (ISO format) if it's a datetime object
+        if isinstance(expires_at, datetime.datetime):
+            expires_at = expires_at.isoformat()  # Convert datetime to string
+
         # Prepare the token data as a dictionary or JSON object
         token_data = {
             "jti": jti,
@@ -152,7 +154,7 @@ def add_revoked_token_function(jti, username, jwt, expires_at, redis_client=None
     except Exception as e:
         app_logger.error(f"Error adding revoked token: {jti} for user {username} in Redis: {str(e)}")
         raise e
-
+        
 def add_issued_token_function(jti, username, jwt, expires_at, token_type, redis_client=None):
     try:
         if redis_client is None:

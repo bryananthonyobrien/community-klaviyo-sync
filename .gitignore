@@ -10,5 +10,8 @@ app.log
 stripe.cfg
 newswhip/
 minikube-darwin-arm64
-
-
+--env
+build_docker_image.sh
+reset_docker.sh
+run_container.sh
+shell.sh

@@ -16,3 +16,4 @@ flask-caching
 unidecode
 brotli
 stripe
+flask-talisman

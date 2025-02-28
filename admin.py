@@ -2,8 +2,11 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 
-# Set up logging to a file
-log_file = os.path.expanduser('~/logs/admin_app.log')
+log_dir = "/root/logs"
+log_file = os.path.join(log_dir, "admin_app.log")
+
+# Ensure log directory exists
+os.makedirs(log_dir, exist_ok=True)
 
 # Use RotatingFileHandler to handle log rotation and prevent stale file handles
 logging.basicConfig(level=logging.DEBUG,
@@ -26,7 +29,7 @@ import jwt  # pyjwt package is needed for decoding JWT
 from werkzeug.security import generate_password_hash
 import argparse
 from datetime import datetime
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 import time
 import requests
 from requests.exceptions import SSLError, RequestException
@@ -39,14 +42,10 @@ sys.path.append('/home/bryananthonyobrien/mysite')
 from cache import export_community_payloads_to_json, delete_community_payloads, view_community_payloads, create_stage_csv_files, get_redis_client, initialize_cache, print_cache_contents, remove_user_from_cache, initialize_user_cache, suspend_user_cache, unsuspend_user_cache, update_user_credits_in_cache
 
 
-# Load environment variables from .env file
-dotenv_path = '/home/bryananthonyobrien/mysite/.env'
-load_dotenv(dotenv_path)
-
-# Debugging - print out the loaded values
-print(f"REDIS_HOST: {os.getenv('REDIS_HOST')}")
-print(f"REDIS_PORT: {os.getenv('REDIS_PORT')}")
-print(f"REDIS_PASSWORD: {os.getenv('REDIS_PASSWORD')}")
+# Debugging: Print available environment variables
+print("Available environment variables:")
+for var in ["REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD", "JWT_SECRET_KEY"]:
+    print(f"{var}: {os.getenv(var)}")
 
 # Example of using them
 redis_host = os.getenv('REDIS_HOST')
@@ -54,14 +53,6 @@ redis_port = os.getenv('REDIS_PORT')
 redis_password = os.getenv('REDIS_PASSWORD')
 
 print(f"Connected to Redis at {redis_host}:{redis_port}")
-
-
-DATABASE_PATH = os.getenv('DATABASE_PATH', 'tokens.db')
-BACKUP_PATH = os.getenv('BACKUP_PATH', 'backup.db')
-
-# Load environment variables from the specified .env file
-dotenv_path = '/home/bryananthonyobrien/mysite/.env'
-load_dotenv(dotenv_path)
 
 # Get JWT secret key
 JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY')

@@ -124,8 +124,8 @@ def create_checkout_session_function():
             success_url = f'https://www.bryanworx.com/success?session_id={{CHECKOUT_SESSION_ID}}&username={username}'
             cancel_url = 'https://www.bryanworx.com/cancel'
         else:
-            success_url = f'http://localhost:5050/success?session_id={{CHECKOUT_SESSION_ID}}&username={username}'  # Dev URL
-            cancel_url = 'http://localhost:5050/cancel'  # Dev URL
+            success_url = f'http://localhost:5001/success?session_id={{CHECKOUT_SESSION_ID}}&username={username}'  # Dev URL
+            cancel_url = 'http://localhost:5001/cancel'  # Dev URL
 
         session = stripe.checkout.Session.create(
             payment_method_types=['card'],
