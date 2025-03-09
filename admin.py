@@ -39,8 +39,8 @@ import redis
 
 import sys
 sys.path.append('/home/bryananthonyobrien/mysite')
-from cache import export_community_payloads_to_json, delete_community_payloads, view_community_payloads, create_stage_csv_files, get_redis_client, initialize_cache, print_cache_contents, remove_user_from_cache, initialize_user_cache, suspend_user_cache, unsuspend_user_cache, update_user_credits_in_cache
-
+from cache import export_community_payloads_to_json, delete_community_payloads, view_community_payloads, create_stage_csv_files, get_redis_client, print_cache_contents, remove_user_from_cache, initialize_user_cache, suspend_user_cache, unsuspend_user_cache
+from credits import log_credit_change
 
 # Debugging: Print available environment variables
 print("Available environment variables:")
@@ -532,25 +532,7 @@ def change_user_role(username, new_role):
     except Exception as e:
         logging.error(f"Error updating role for user {username}: {str(e)}")
  
-def log_credit_change(redis_client, username, amount, source, transaction_id):
-    try:
-        # Create the credit change log entry
-        credit_change = {
-            "username": username,
-            "amount": amount,
-            "source": source,
-            "transaction_id": transaction_id,
-            "change_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        }
-        
-        # Store the credit change in a Redis list
-        redis_client.rpush(f"{username}:credit_changes", json.dumps(credit_change))
-        app_logger.debug(f"Logged credit change for user {username}: {credit_change}")
-    except Exception as e:
-        app_logger.error(f"Error logging credit change for user {username}: {e}")
-        raise
-
-def change_user_credits(username, credits, action):
+def change_user_credits_in_admin(username, credits, action):
     logging.info(f"Attempting to {action} {credits} credits for user {username}.")
     
     redis_client = get_redis_client()
@@ -587,9 +569,6 @@ def change_user_credits(username, credits, action):
 
     # Log the updated credits
     logging.info(f"Updated credits for user {username}: {new_credits}")
-
-    # Update the cache (Redis already updated, so this part is not necessary)
-    # update_user_credits_in_cache(username, new_credits)
 
     return "Success"
     
@@ -989,7 +968,7 @@ def remove_user_transactions(username, redis_client=None):
         redis_client = redis_client if redis_client else get_redis_client()
 
         # Define the Redis key pattern for the user's transactions
-        transactions_key = f"user:{username}:transactions"
+        transactions_key = f"{username}:credit_changes"
 
         # Check if the key exists
         if redis_client.exists(transactions_key):
@@ -1027,7 +1006,6 @@ def interactive_help():
         "List User Transactions",
         "Revoke Tokens",
         "Secure User Account",
-        "Initialize Cache",
         "Print Cache Contents",
         "Remove User Transactions",
         "Display Discoveries Records",
@@ -1035,7 +1013,7 @@ def interactive_help():
         "Create Staging Files",
         "View Community Payloads",  # View Redis payloads
         "Delete Community Payloads",  # Delete Redis payloads
-        "Export Community Payloads to JSON",  # Export payloads
+        "Export Community Payloads to JSON",
         "Exit"
     ]
 
@@ -1055,61 +1033,74 @@ def interactive_help():
             password = input("Enter password: ")
             role = input("Enter role (admin/client) [client]: ") or 'client'
             add_user(username, password, role)
+
         elif choice == 2:
             username = input("Enter username to remove: ")
             remove_user(username)
+
         elif choice == 3:
             list_users()
+
         elif choice == 4:
             username = input("Enter username: ")
             new_password = input("Enter new password: ")
             change_password(username, new_password)
+
         elif choice == 5:
             username = input("Enter username: ")
             list_tokens(username)
+
         elif choice == 6:
             username = input("Enter username: ")
             new_role = input("Enter new role (admin/client): ")
             change_user_role(username, new_role)
+
         elif choice == 7:
             username = input("Enter username: ")
             action = input("Do you want to add or remove credits? (add/remove): ").strip().lower()
             if action in ['add', 'remove']:
                 try:
                     credits = int(input("Enter number of credits: "))
-                    result = change_user_credits(username, credits, action)
+                    result = change_user_credits_in_admin(username, credits, action)
                     if result != "Success":
-                        print(result)  # Print the error message if there's an error
+                        print(result)  # Print any error message if there's an error
                 except ValueError:
                     print("Invalid number of credits. Please enter an integer.")
             else:
                 print("Invalid action. Please enter 'add' or 'remove'.")
+
         elif choice == 8:
             remove_expired_tokens()
+
         elif choice == 9:
             get_limits()
+
         elif choice == 10:
             set_limits()
+
         elif choice == 11:
             username = input("Enter username to suspend: ")
             suspend_user(username)
+
         elif choice == 12:
             username = input("Enter username to unsuspend: ")
             unsuspend_user(username)
+
         elif choice == 13:
             username = input("Enter username to list transactions: ")
             list_user_transactions(username)
+
         elif choice == 14:
             username = input("Enter username to revoke tokens: ")
             revoke_tokens(username)
+
         elif choice == 15:
             secure_user_account()
+
         elif choice == 16:
-            result = initialize_cache()
-            print(result)
-        elif choice == 17:
             print_cache_contents()
-        elif choice == 18:
+
+        elif choice == 17:
             username = input("Enter username to remove transactions: ")
             confirm = input(f"Are you sure you want to remove all transactions for {username}? (yes/no): ").strip().lower()
             if confirm == 'yes':
@@ -1120,16 +1111,20 @@ def interactive_help():
                     print(f"All transactions for user {username} have been removed.")
             else:
                 print("Operation canceled.")
-        elif choice == 19:
+
+        elif choice == 18:
             username = input("Enter username to display discoveries records: ")
             display_discoveries_records(username)
-        elif choice == 20:
+
+        elif choice == 19:
             username = input("Enter username to remove Klaviyo discovery records: ")
             remove_klaviyo_discoveries(username)
-        elif choice == 21:
+
+        elif choice == 20:
             username = input("Enter username to create staging files: ")
             create_stage_csv_files(username)
-        elif choice == 22:
+
+        elif choice == 21:
             limit = input("Enter the number of community payloads to view (default 10): ")
             limit = int(limit) if limit.isdigit() else 10
             payloads = view_community_payloads(limit)
@@ -1142,132 +1137,254 @@ def interactive_help():
                     for field, val in value.items():
                         print(f"  {field.decode('utf-8')}: {val.decode('utf-8')}")
                     print("\n")
-        elif choice == 23:
+
+        elif choice == 22:
             confirm = input("Are you sure you want to delete all community payloads? (yes/no): ").strip().lower()
             if confirm == 'yes':
                 deleted_keys = delete_community_payloads()
                 print(f"Deleted {len(deleted_keys)} keys.")
             else:
                 print("Operation canceled.")
-        elif choice == 24:  # Export community payloads to JSON
+
+        elif choice == 23:  # Export community payloads to JSON
             username = input("Enter username for exporting payloads: ")
             export_result = export_community_payloads_to_json(username)
             # Parse the JSON string into a dictionary
             export_result_dict = json.loads(export_result)
             print(f"Exported {export_result_dict['payload_count']} payloads to file: {export_result_dict['file_path']}")
-        elif choice == 25:
+
+        elif choice == 24:
             print("Exiting...")
             break
+
         else:
             print("Invalid choice. Please select a valid option.")
-
+            
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(description="Manage users, database schema, and scheduled tasks")
-    parser.add_argument('--clear-discover-klaviyo-status', metavar='username', help="Clear Discover Klaviyo status for a user")
-    parser.add_argument('--display-klaviyo-status', metavar='username', help="Display Klaviyo status for a user")
-    parser.add_argument('--init-tables', action='store_true', help="Initialize database tables")
-    parser.add_argument('--display-discoveries-records', metavar='username', help="Display discoveries records for a user")
-    parser.add_argument('--add-user', nargs=3, metavar=('username', 'password', 'role'), help="Add a new user")
-    parser.add_argument('--reset-schema', action='store_true', help="Drop and recreate tables")
-    parser.add_argument('--remove-user', metavar='username', help="Remove a user")
-    parser.add_argument('--list-users', action='store_true', help="List all users")
-    parser.add_argument('--change-password', nargs=2, metavar=('username', 'new_password'), help="Change user password")
-    parser.add_argument('--backup-db', action='store_true', help="Backup the database")
-    parser.add_argument('--restore-db', action='store_true', help="Restore the database from a backup")
-    parser.add_argument('--list-tokens', metavar='username', help="List tokens for a user")
-    parser.add_argument('--change-role', nargs=2, metavar=('username', 'new_role'), help="Change user role")
-    parser.add_argument('--change-credits', nargs=3, metavar=('username', 'credits', 'action'), help="Change user credits")
-    parser.add_argument('--remove-expired-tokens', action='store_true', help="Remove expired tokens")
-    parser.add_argument('--get-limits', action='store_true', help="Get rate limits for all users")
-    parser.add_argument('--set-limits', action='store_true', help="Set rate limits for a user")
-    parser.add_argument('--persist-data', action='store_true', help="Persist client data")
-    parser.add_argument('--suspend-user', metavar='username', help="Suspend a user")
-    parser.add_argument('--unsuspend-user', metavar='username', help="Unsuspend a user")
-    parser.add_argument('--list-transactions', metavar='username', help="List transactions for a user")
-    parser.add_argument('--revoke-tokens', metavar='username', help="Revoke all tokens for a user")
-    parser.add_argument('--secure-account', action='store_true', help="Secure user account")
-    parser.add_argument('--initialize-cache', action='store_true', help="Initialize the cache")
-    parser.add_argument('--print-cache-contents', action='store_true', help="Print cache contents")
-    parser.add_argument('--reset-database-status', action='store_true', help="Reset database status")
-    parser.add_argument('--remove-discoveries-records', metavar='username', help="Remove all Klaviyo discoveries for a user")
-    parser.add_argument('--create_stage_csv_files', metavar='username', help="Create stage.csv files")
-    parser.add_argument('--view-community-payloads', action='store_true', help="View community payloads from Redis")
-    parser.add_argument('--delete-community-payloads', action='store_true', help="Delete all community payloads from Redis")
-    parser.add_argument('--export-community-payloads-to-json', metavar='username', help="Export community payloads to JSON")
+    parser = argparse.ArgumentParser(description="CLI for user & system actions (mirroring the interactive menu)")
+
+    # 1. Add User
+    parser.add_argument(
+        '--add-user', nargs=3, metavar=('username', 'password', 'role'),
+        help="Add a new user"
+    )
+
+    # 2. Remove User
+    parser.add_argument(
+        '--remove-user', metavar='username',
+        help="Remove a user"
+    )
+
+    # 3. List Users
+    parser.add_argument(
+        '--list-users', action='store_true',
+        help="List all users"
+    )
+
+    # 4. Change Password
+    parser.add_argument(
+        '--change-password', nargs=2, metavar=('username', 'new_password'),
+        help="Change user password"
+    )
+
+    # 5. List Tokens
+    parser.add_argument(
+        '--list-tokens', metavar='username',
+        help="List tokens for a user"
+    )
+
+    # 6. Change User Role
+    parser.add_argument(
+        '--change-role', nargs=2, metavar=('username', 'new_role'),
+        help="Change a user's role (admin or client)"
+    )
+
+    # 7. Change User Credits
+    parser.add_argument(
+        '--change-credits', nargs=3, metavar=('username', 'credits', 'action'),
+        help="Change a user's credits (action must be add/remove)"
+    )
+
+    # 8. Remove Expired Tokens
+    parser.add_argument(
+        '--remove-expired-tokens', action='store_true',
+        help="Remove expired tokens"
+    )
+
+    # 9. Get Limits
+    parser.add_argument(
+        '--get-limits', action='store_true',
+        help="Get rate limits for all users"
+    )
+
+    # 10. Set Limits
+    parser.add_argument(
+        '--set-limits', action='store_true',
+        help="Set rate limits for a user"
+    )
+
+    # 11. Suspend User
+    parser.add_argument(
+        '--suspend-user', metavar='username',
+        help="Suspend a user"
+    )
+
+    # 12. Unsuspend User
+    parser.add_argument(
+        '--unsuspend-user', metavar='username',
+        help="Unsuspend a user"
+    )
+
+    # 13. List User Transactions
+    parser.add_argument(
+        '--list-transactions', metavar='username',
+        help="List transactions for a user"
+    )
+
+    # 14. Revoke Tokens
+    parser.add_argument(
+        '--revoke-tokens', metavar='username',
+        help="Revoke all tokens for a user"
+    )
+
+    # 15. Secure User Account
+    parser.add_argument(
+        '--secure-account', action='store_true',
+        help="Secure a user account"
+    )
+
+    # 16. Print Cache Contents
+    parser.add_argument(
+        '--print-cache-contents', action='store_true',
+        help="Print cache contents"
+    )
+
+    # 17. Remove User Transactions
+    parser.add_argument(
+        '--remove-user-transactions', metavar='username',
+        help="Remove user transactions"
+    )
+
+    # 18. Display Discoveries Records
+    parser.add_argument(
+        '--display-discoveries-records', metavar='username',
+        help="Display 'discoveries' records for a user"
+    )
+
+    # 19. Remove Klaviyo Discovery Records
+    parser.add_argument(
+        '--remove-discoveries-records', metavar='username',
+        help="Remove Klaviyo discovery records for a user"
+    )
+
+    # 20. Create Staging Files
+    parser.add_argument(
+        '--create-stage-csv-files', metavar='username',
+        help="Create staging CSV files for a user"
+    )
+
+    # 21. View Community Payloads
+    parser.add_argument(
+        '--view-community-payloads', action='store_true',
+        help="View community payloads in Redis"
+    )
+
+    # 22. Delete Community Payloads
+    parser.add_argument(
+        '--delete-community-payloads', action='store_true',
+        help="Delete all community payloads from Redis"
+    )
+
+    # 23. Export Community Payloads to JSON
+    parser.add_argument(
+        '--export-community-payloads-to-json', metavar='username',
+        help="Export community payloads to a JSON file"
+    )
 
     args = parser.parse_args()
 
+    # 21. View Community Payloads
     if args.view_community_payloads:
         limit = input("Enter how many payloads to view (default 10): ")
         limit = int(limit) if limit.isdigit() else 10
         view_community_payloads(limit)
+
+    # 22. Delete Community Payloads
     elif args.delete_community_payloads:
         confirm = input("Are you sure you want to delete all community payloads? (yes/no): ").strip().lower()
         if confirm == 'yes':
             deleted_keys = delete_community_payloads()
             print(f"Deleted {len(deleted_keys)} keys.")
+
+    # 23. Export Community Payloads to JSON
     elif args.export_community_payloads_to_json:
         timestamp = int(time.time())
         export_result = export_community_payloads_to_json(args.export_community_payloads_to_json, timestamp)
         print(f"Export complete. Payloads exported: {export_result['num_payloads']}")
         print(f"File location: {export_result['file_path']}")
-    elif args.clear_discover_klaviyo_status:
-        print("Not needed")
-    elif args.display_klaviyo_status:
-        print("Not needed")
-    elif args.init_tables:
-        initialize_tables()
+
     elif args.add_user:
         add_user(*args.add_user)
-    elif args.reset_schema:
-        drop_and_create_tables()
+
     elif args.remove_user:
         remove_user(args.remove_user)
+
     elif args.list_users:
         list_users()
+
     elif args.change_password:
         change_password(*args.change_password)
-    elif args.backup_db:
-         print("Not needed")
-    elif args.restore_db:
-         print("Not needed")
+
     elif args.list_tokens:
         list_tokens(args.list_tokens)
+
     elif args.change_role:
         change_user_role(*args.change_role)
+
     elif args.change_credits:
-        change_user_credits(args.change_credits[0], int(args.change_credits[1]), args.change_credits[2])
+        username, credits_str, action = args.change_credits
+        change_user_credits_in_admin(username, int(credits_str), action)
+
     elif args.remove_expired_tokens:
         remove_expired_tokens()
+
     elif args.get_limits:
         get_limits()
+
     elif args.set_limits:
         set_limits()
-    elif args.persist_data:
-        persist_client_data()
+
     elif args.suspend_user:
         suspend_user(args.suspend_user)
+
     elif args.unsuspend_user:
         unsuspend_user(args.unsuspend_user)
+
     elif args.list_transactions:
         list_user_transactions(args.list_transactions)
+
     elif args.revoke_tokens:
         revoke_tokens(args.revoke_tokens)
+
     elif args.secure_account:
         secure_user_account()
-    elif args.initialize_cache:
-        initialize_cache()
+
     elif args.print_cache_contents:
         print_cache_contents()
-    elif args.reset_database_status:
-        reset_database_status()
+
+    elif args.remove_user_transactions:
+        remove_user_transactions(args.remove_user_transactions)
+
     elif args.display_discoveries_records:
         display_discoveries_records(args.display_discoveries_records)
+
     elif args.remove_discoveries_records:
         remove_klaviyo_discoveries(args.remove_discoveries_records)
+
     elif args.create_stage_csv_files:
         create_stage_csv_files(args.create_stage_csv_files)
+
     else:
         interactive_help()
 

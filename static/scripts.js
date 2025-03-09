@@ -95,8 +95,8 @@ function addCheckoutEventListener() {
             const creditsInput = document.getElementById('credits-input');
             const credits = parseInt(creditsInput.value);
 
-            if (isNaN(credits) || credits < 10000) { // Assuming 10000 is the minimum number of credits
-                alert('Minimum number of credits is 10000');
+            if (isNaN(credits) || credits < 1000) { // Assuming 1000 is the minimum number of credits
+                alert('Minimum number of credits is 1000');
                 return;
             }
 

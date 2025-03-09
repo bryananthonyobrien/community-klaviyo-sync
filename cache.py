@@ -4,7 +4,7 @@ import threading
 from redis import Redis
 from logs import app_logger  # Ensure this import is correct and does not cause circular imports
 from redis import exceptions as redis_exceptions
-from common import decode_redis_values, get_db_connection  # Import the get_db_connection function from the common module
+from common import decode_redis_values  
 from datetime import datetime
 import sqlite3
 import csv
@@ -13,7 +13,6 @@ import re
 import redis
 from collections import defaultdict
 import math
-
 
 # Initialize the cache
 cache = Cache()
@@ -153,36 +152,6 @@ def get_redis_client():
         db=int(os.getenv('REDIS_DB', 0))
     )
 
-def initialize_cache(app=None):
-    try:
-        if app:
-            app.config.from_mapping(cache_config)
-            cache.init_app(app)
-        else:
-            redis_client = get_redis_client()
-            redis_client.flushdb()
-
-            # Fetch user data from the database
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT username, credits, status FROM users")
-                users = cursor.fetchall()
-
-                for user in users:
-                    username, credits, status = user
-                    user_data = {
-                        "api_calls": 0,
-                        "credits": credits,
-                        "user_status": status  # Changed status to user_status
-                    }
-                    redis_client.hmset(username, user_data)
-
-            app_logger.info("Cache initialized with user data from the database")
-        return "Cache initialized successfully."
-    except Exception as e:
-        app_logger.error(f"Error initializing cache: {str(e)}")
-        return "Error initializing cache."
-
 def initialize_user_cache(username, password, role='client', login_attempts=0, last_login_attempt='None', credits=10, user_status='active', is_logged_in_now=0, created='None', daily_limit=200, hourly_limit=50, minute_limit=10):
     try:
         redis_client = get_redis_client()
@@ -226,8 +195,16 @@ def initialize_user_cache(username, password, role='client', login_attempts=0, l
 
         # Initialize the user's credit_changes as an empty list (if no changes yet)
         redis_client.delete(f"{username}:credit_changes")  # Clean up if it exists already
-        redis_client.lpush(f"{username}:credit_changes", f"Initial credit set to {credits} at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
-
+        redis_client.lpush(
+    		f"{username}:credit_changes",
+   			 json.dumps({
+        		"username": username,
+       			"amount": credits,
+       			"source": "initial",
+        		"transaction_id": "0",
+        		"change_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    		})
+		)
         # Log the initialization of the user's cache in Redis
         app_logger.info(f"Cache initialized for user: {username} with all attributes.")
         app_logger.info(f"Limits set for user {username}: Daily={daily_limit}, Hourly={hourly_limit}, Minute={minute_limit}")
@@ -1797,89 +1774,47 @@ def create_stage_csv_files(username, silent=False):
     except Exception as e:
         print(f"Error processing profiles: {str(e)}")
 
-def sync_credits_to_db(username, source="usage sync triggered by insufficient credit"):
+def log_credit_change_old(username, amount, source, transaction_id='0'):
+    """
+    Log credit changes in a Redis list instead of an SQL table.
+    Each log entry is stored as a JSON string for easy parsing later.
+    """
     try:
-        redis_client = get_redis_client()
-        user_data = redis_client.hgetall(username)
-        if user_data and b'credits' in user_data:
-            redis_credits = int(user_data[b'credits'].decode('utf-8'))
+        # Early exit if the amount is 0; no change to log
+        if amount == 0:
+            return
 
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
+        redis_client = get_redis_client()  # however you get your Redis client
 
-                # Fetch current credits from the database before updating
-                cursor.execute("SELECT credits FROM users WHERE username = ?", (username,))
-                current_db_credits = cursor.fetchone()[0]
+        # Build a structured record so you can parse it later
+        record = {
+            "amount": amount,
+            "source": source,
+            "transaction_id": transaction_id,
+            "change_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        }
 
-                # Log the credit change before syncing, only if the amount is not 0
-                if current_db_credits != 0:
-                    log_credit_change(cursor, username, -current_db_credits, source)
+        # Push this record onto the credit_changes list for the user
+        redis_client.lpush(
+            f"{username}:credit_changes",
+            json.dumps(record)  # store as JSON string
+        )
 
-                # Update the database with the credits from Redis
-                cursor.execute("UPDATE users SET credits = ? WHERE username = ?", (redis_credits, username))
-                conn.commit()
+        app_logger.info(
+            f"Logged credit change in Redis for user {username}: "
+            f"amount={amount}, source={source}, transaction_id={transaction_id}"
+        )
 
-                app_logger.info(f"Synchronized credits for user {username} from Redis to database: {redis_credits}")
-        else:
-            app_logger.warning(f"User {username} not found in Redis during sync.")
+    except redis.RedisError as e:
+        app_logger.error(
+            f"Redis error logging credit change for user {username}: {e}"
+        )
+        raise
     except Exception as e:
-        app_logger.error(f"Error synchronizing credits from Redis to database for user {username}: {str(e)}")
-
-def log_credit_change(cursor, user_id, amount, source, transaction_id='0'):
-    try:
-        if amount != 0:  # Only log if the amount is not zero
-            cursor.execute("""
-                INSERT INTO credit_changes (user_id, amount, source, transaction_id, change_date)
-                VALUES (?, ?, ?, ?, ?)
-            """, (user_id, amount, source, transaction_id, datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')))
-            app_logger.info(f"Logged credit change: user_id={user_id}, amount={amount}, source={source}, transaction_id={transaction_id}")
-    except sqlite3.Error as e:
-        app_logger.error(f"Database error logging credit change for user {user_id}: {e}")
-        raise  # Re-raise the exception to be handled in the calling function
-
-def update_user_credits_in_cache(username, new_credits):
-    try:
-        redis_client = get_redis_client()
-        if redis_client.exists(username):
-            redis_client.hmset(username, {'credits': new_credits})
-            app_logger.info(f"Updated credits in cache for user {username}: {new_credits}")
-        else:
-            app_logger.warning(f"User {username} not found in cache when trying to update credits.")
-    except redis_exceptions.ConnectionError as e:
-        app_logger.error(f"Redis connection error in update_user_credits_in_cache: {str(e)}")
-    except Exception as e:
-        app_logger.error(f"Error updating credits in cache for user {username}: {str(e)}")
-
-def track_api_call(user_id, credits_to_deduct=0):
-    global cache_status
-    with api_call_tracker_lock:
-        try:
-            redis_client = get_redis_client()
-            user_data = redis_client.hgetall(user_id)
-            if not user_data:
-                user_data = {'api_calls': 0, 'credits': 0, 'user_status': 'active'}  # Changed status to user_status
-            else:
-                user_data = {k.decode(): int(v.decode()) if v.decode().isdigit() else v.decode() for k, v in user_data.items()}
-
-            user_status = user_data.get('user_status', 'active')  # Changed status to user_status
-            if user_status == 'suspended':
-                app_logger.warning(f"API call attempt by suspended user: {user_id}")
-                return {'user_status': 'suspended'}, cache_status  # Changed status to user_status
-
-            api_calls = user_data.get('api_calls', 0)
-            credits = user_data.get('credits', 0)
-
-            api_calls += 1
-            credits -= credits_to_deduct
-
-            redis_client.hmset(user_id, {'api_calls': api_calls, 'credits': credits})
-            app_logger.debug(f"After increment - track_api_call: {user_id} - API Calls: {api_calls}, Credits: {credits}")
-            cache_status = "Cache Available"
-            return {'user_status': 'active', 'api_calls': api_calls, 'credits': credits}, cache_status  # Changed status to user_status
-        except redis_exceptions.ConnectionError as e:
-            app_logger.error(f"Redis connection error in track_api_call: {str(e)}")
-            cache_status = "Cache Unavailable"
-            return {'user_status': 'error'}, cache_status  # Changed status to user_status
+        app_logger.error(
+            f"Unexpected error logging credit change for user {username}: {e}"
+        )
+        raise
 
 def get_user_data(user_id):
     global cache_status
@@ -1946,7 +1881,6 @@ def get_user_data(user_id):
                 'created': 'None', 
                 'role': 'client'
             }, cache_status  # Fallback to default values
-
 
 def reset_user_data(user_id):
     global cache_status

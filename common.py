@@ -10,7 +10,6 @@ from klaviyo import get_redis_client
 import json
 import datetime
 
-DATABASE_PATH = os.getenv('DATABASE_PATH', 'tokens.db')
 DEFAULT_DAILY_LIMIT = int(os.getenv('DEFAULT_DAILY_LIMIT', 200))
 DEFAULT_HOURLY_LIMIT = int(os.getenv('DEFAULT_HOURLY_LIMIT', 50))
 DEFAULT_MINUTE_LIMIT = int(os.getenv('DEFAULT_MINUTE_LIMIT', 10))
@@ -181,23 +180,6 @@ def add_issued_token_function(jti, username, jwt, expires_at, token_type, redis_
         app_logger.error(f"Error adding issued token: {jti} for user {username} in Redis: {str(e)}")
         raise e
         
-def get_db_connection():
-    retries = 5
-    while retries > 0:
-        try:
-            conn = sqlite3.connect(DATABASE_PATH, timeout=3)  # Set timeout to 3 seconds
-            conn.execute('PRAGMA journal_mode=WAL;')  # Ensure WAL mode is set
-            return conn
-        except sqlite3.OperationalError as e:
-            if "database is locked" in str(e):
-                retries -= 1
-                time.sleep(1)  # Wait before retrying
-            elif "no such table" in str(e):
-                print(f"Database missing or corrupted. Re-initializing: {str(e)}")
-            else:
-                raise
-    raise sqlite3.OperationalError("Database is locked or missing, retries exhausted")
-
 def reissue_access_token_with_claims(username, role, credits, daily_limit, hourly_limit, minute_limit):
     additional_claims = {
         "role": role,

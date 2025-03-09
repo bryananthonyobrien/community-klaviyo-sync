@@ -4,21 +4,10 @@ import traceback
 from flask import jsonify, request, session
 from werkzeug.security import check_password_hash
 from logs import app_logger
-from common import decode_redis_values, get_db_connection, DEFAULT_DAILY_LIMIT, DEFAULT_HOURLY_LIMIT, DEFAULT_MINUTE_LIMIT
+from common import decode_redis_values, DEFAULT_DAILY_LIMIT, DEFAULT_HOURLY_LIMIT, DEFAULT_MINUTE_LIMIT
 from credits import create_tokens
 from cache import get_user_data, get_redis_client
 import redis
-
-def user_exists_sql(username):
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1 FROM users WHERE username = ?", (username,))
-            result = cursor.fetchone()
-            return result is not None
-    except Exception as e:
-        app_logger.error(f"Error checking if user exists: {str(e)}")
-        return False
 
 def user_exists(username):
     try:

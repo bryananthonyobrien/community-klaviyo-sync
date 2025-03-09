@@ -31,15 +31,15 @@ from flask import Response
 import redis
 from datetime import datetime, timedelta  # Ensure this import is included
 from ipinfo import create_ipinfo_cache_file, load_ipinfo_cache, update_ipinfo_cache_file, is_valid_ip, do_ip_address_look_up
-
+import sys  # Ensure this is imported
 
 # Import custom modules
-from cache import track_api_call, get_user_data, sync_credits_to_db, clash_members_and_profiles, create_stage_csv_files
+from cache import get_user_data, clash_members_and_profiles, create_stage_csv_files
 app_logger.debug("Importing credits module in app.py")
 from credits import create_tokens, cancel_payment_function, payment_success_function, create_checkout_session_function, stripe_webhook_function
 app_logger.debug("Imported credits module successfully in app.py")
 app_logger.debug("Importing common module in app.py")
-from common import is_token_revoked, add_issued_token_function, revoke_all_access_tokens_for_user, decode_jwt, add_revoked_token_function, get_db_connection, DEFAULT_DAILY_LIMIT, DEFAULT_HOURLY_LIMIT, DEFAULT_MINUTE_LIMIT
+from common import is_token_revoked, add_issued_token_function, revoke_all_access_tokens_for_user, decode_jwt, add_revoked_token_function, DEFAULT_DAILY_LIMIT, DEFAULT_HOURLY_LIMIT, DEFAULT_MINUTE_LIMIT
 app_logger.debug("Imported common module successfully in app.py")
 from login import login_function
 from logout import logout_function
@@ -77,9 +77,6 @@ csp = {
 Talisman(app, content_security_policy=csp,force_https=False)
 
 is_loading_clients = True
-
-# Use the environment variable
-DATABASE_PATH = os.getenv('DATABASE_PATH', 'tokens.db')
 
 # Set up JWT expiration times
 access_token_expires_minutes = int(os.getenv('JWT_ACCESS_TOKEN_EXPIRES_MINUTES', 15))
@@ -249,9 +246,6 @@ def payment_success():
 def cancel():
     # Handle cancelled payment
     return cancel_payment_function()
-
-import sys  # Ensure this is imported
-
 
 def fetch_sms_profiles_for_user(username, chunk_number=1):
     """
@@ -652,7 +646,6 @@ def preopt_into_community_all():
     app_logger.info(f"Response data:\n{json.dumps(response_data, indent=4)}")
     return jsonify(response_data), 200
 
-
 @app.route('/check_import_status', methods=['GET'])
 @jwt_required()
 def check_import_status():
@@ -795,10 +788,31 @@ def login():
 def create_checkout_session():
     return create_checkout_session_function()
 
-@measure_time
+import stripe
+
 @app.route('/webhook', methods=['POST'])
 def stripe_webhook():
-    return stripe_webhook_function()
+    app_logger.info("Stripe Webhook received an event")
+
+    payload = request.get_data(as_text=True)
+    sig_header = request.headers.get('Stripe-Signature')
+
+     # app_logger.info(f"Here is its : {payload}")
+     # app_logger.info(f"🔑 Stripe Signature Header: {sig_header}")
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, os.getenv("STRIPE_WEBHOOK_SECRET")
+        )
+        app_logger.info(f"It's an {event['type']} event")
+    except stripe.error.SignatureVerificationError as e:
+        app_logger.error(f"❌ Webhook signature verification failed: {str(e)}")
+        return jsonify({"error": "Webhook signature verification failed"}), 400
+    except Exception as e:
+        app_logger.error(f"❌ Webhook processing failed: {str(e)}")
+        return jsonify({"error": "Webhook processing failed"}), 400
+
+    return stripe_webhook_function(event)  # Pass the event object to the handler
 
 import csv
 
@@ -2313,6 +2327,12 @@ def get_configuration():
 
     try:
         redis_client = get_redis_client()
+
+        # Log user's credits at the start
+        initial_credits = redis_client.hget(username, "credits")
+        initial_credits = int(initial_credits) if initial_credits else 0
+        app_logger.info(f"🔹 Credits for user {username}: {initial_credits}")
+
         config_key = f"configuration_{username}"
 
         # Fetch values from Redis hash
@@ -2321,7 +2341,7 @@ def get_configuration():
         community_api_token = redis_client.hget(config_key, 'COMMUNITY_API_TOKEN') or ''
         max_workers = redis_client.hget(config_key, 'max_community_workers') or ''
         sub_community = redis_client.hget(config_key, 'SUB_COMMUNITY') or ''
-        stripe_publishable_key = redis_client.hget(config_key, 'STRIPE_PUBLISHABLE_KEY') or ''  # Add Stripe Publishable Key
+        stripe_publishable_key = redis_client.hget(config_key, 'STRIPE_PUBLISHABLE_KEY') or ''
 
         # Return the configuration values as JSON
         return jsonify({
@@ -2330,11 +2350,11 @@ def get_configuration():
             "community_api_token": community_api_token.decode('utf-8') if community_api_token else '',
             "max_workers": int(max_workers) if max_workers else '',
             "sub_community": sub_community.decode('utf-8') if sub_community else '',
-            "stripe_publishable_key": stripe_publishable_key.decode('utf-8') if stripe_publishable_key else ''  # Add Stripe Publishable Key to the response
+            "stripe_publishable_key": stripe_publishable_key.decode('utf-8') if stripe_publishable_key else ''
         }), 200
 
     except Exception as e:
-        app_logger.error(f"Error fetching configuration for user {username}: {str(e)}")
+        app_logger.error(f"❌ Error fetching configuration for user {username}: {str(e)}")
         return jsonify({"error": "Failed to retrieve configuration"}), 500
 
 
@@ -3403,36 +3423,56 @@ def cpu_usage():
 @app.errorhandler(ExpiredSignatureError)
 def handle_expired_error(e):
     try:
-        token = request.headers.get('Authorization').split()[1]
-        app_logger.info(f"handle_expired_error: JWT_SECRET_KEY set: {app.config['JWT_SECRET_KEY']}")
-        decoded_token = decode_jwt(token, app.config['JWT_SECRET_KEY'], allow_expired=True)  # Allow expired tokens
-        jti = decoded_token['jti']
-        expires_at = datetime.utcfromtimestamp(decoded_token['exp'])
+        # 1) Decode the token even if expired
+        token_str = request.headers.get('Authorization').split()[1]
+        decoded_token = decode_jwt(token_str, app.config['JWT_SECRET_KEY'], allow_expired=True)
+        
+        # 2) Extract jti, username, expires_at from decoded token
+        jti = decoded_token.get('jti')
+        expires_dt = datetime.utcfromtimestamp(decoded_token['exp'])
+        username = decoded_token.get('sub')  # or "username"
+        
+        if not jti or not username:
+            return jsonify({"msg": "Token information not found"}), 401
+        
+        # 3) Connect to Redis
+        redis_client = get_redis_client()
+        
+        # 4) Find the matching JSON in "issued_tokens"
+        all_tokens = redis_client.smembers("issued_tokens")
+        token_json_to_revoke = None
+        
+        for t_bytes in all_tokens:
+            t_str = t_bytes.decode('utf-8')
+            t_data = json.loads(t_str)
+            if t_data.get("jti") == jti:
+                token_json_to_revoke = t_str
+                break
+        
+        if token_json_to_revoke:
+            # 5a) Remove from the "issued_tokens" set
+            redis_client.srem("issued_tokens", token_json_to_revoke)
 
-        jti, username = get_jti_and_username(jti)
+            # 5b) Add it to the "revoked_tokens" set
+            add_revoked_token_function(
+                jti=jti,
+                username=username,
+                jwt=token_str,  # or t_data['jwt']
+                expires_at=expires_dt,
+                redis_client=redis_client
+            )
 
-        if jti and username:
-            # Revoke the expired token
-            with get_db_connection() as conn:
-                add_revoked_token_function(jti, username, token, expires_at, conn)
-
-            # Remove the expired token from the issued_tokens table
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM issued_tokens WHERE jti = ?", (jti,))
-                conn.commit()
-                app_logger.debug(f"Removed expired token: {jti} for user {username}")
-
+            app_logger.debug(f"Removed expired token: {jti} for user {username}")
             return jsonify({"msg": "Token has expired and has been logged out"}), 401
         else:
-            return jsonify({"msg": "Token information not found"}), 401
+            # If we don't find the JSON in "issued_tokens", it's either already revoked or never existed
+            return jsonify({"msg": "Token not found in issued tokens"}), 401
 
-    except sqlite3.OperationalError:
-        app_logger.error("Error handling expired token")
-        return jsonify({"error": "Database error. Please try again later."}), 500
+    except redis.RedisError as re:
+        app_logger.error(f"Redis error handling expired token: {str(re)}")
+        return jsonify({"error": "Redis error. Please try again later."}), 500
     except Exception as exc:
         app_logger.error(f"Error handling expired token: {str(exc)}")
-        app_logger.error(traceback.format_exc())
         return jsonify({"error": "Internal Server Error"}), 500
 
 @app.route('/logout', methods=['POST'])

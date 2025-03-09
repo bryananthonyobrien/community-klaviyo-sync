@@ -4,7 +4,7 @@ import traceback
 import redis
 from flask import jsonify, request, session, current_app as app
 from flask_jwt_extended import get_jwt, get_jwt_identity
-from common import get_db_connection, add_revoked_token_function, revoke_all_access_tokens_for_user
+from common import add_revoked_token_function, revoke_all_access_tokens_for_user
 from logs import app_logger
 from cache import get_redis_client
 
