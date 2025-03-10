@@ -29,121 +29,6 @@ cache_config = {
     'CACHE_REDIS_DB': os.getenv('REDIS_DB', 0)
 }
 
-api_call_tracker_lock = threading.Lock()
-
-def export_community_payloads_to_json(username):
-    """
-    Fetch all 'community_payload_*' entries from Redis, extract the payload and timestamp, and export them to a JSON file.
-    The file will be saved in the directory: /home/bryananthonyobrien/mysite/data/community/imports/{username}/{timestamp}.
-    Returns a JSON structure with the full file path and the number of payloads.
-    """
-    try:
-        redis_client = get_redis_client()
-        payloads = []
-
-        # Fetch all matching keys to count the total number of payloads
-        total_keys = 0
-        for key in redis_client.scan_iter(match="community_payload_*"):
-            total_keys += 1
-
-        if total_keys == 0:
-            app_logger.info(f"No community payloads found.")
-            return json.dumps({"file_path": None, "payload_count": 0})
-
-        print(f"Found {total_keys} community payloads. Starting export...")
-
-        # Fetch the actual payload data
-        valid_payloads = 0
-        for index, key in enumerate(redis_client.scan_iter(match="community_payload_*"), start=1):
-            payload_data = redis_client.hgetall(key)
-
-            # Access the data field, then extract the payload and timestamp fields from the data
-            data_str = payload_data.get(b'data')
-            if data_str:
-                try:
-                    data = json.loads(data_str.decode('utf-8'))
-                    payload = data.get('payload')
-                    timestamp = data.get('timestamp')
-                    if payload and timestamp:
-                        # Append both payload and timestamp to the payloads list
-                        payloads.append({
-                            "payload": payload,
-                            "timestamp": timestamp
-                        })
-                        valid_payloads += 1
-                    else:
-                        print(f"Missing 'payload' or 'timestamp' field in 'data' for key: {key}")
-                except json.JSONDecodeError as e:
-                    print(f"Error decoding JSON for key {key}: {e}")
-            else:
-                print(f"No 'data' field found for key: {key}")
-
-            # Output progress for every 10 payloads processed
-            if index % 10 == 0 or index == total_keys:
-                print(f"Processed {index}/{total_keys} payloads...")
-
-        if valid_payloads == 0:
-            app_logger.info(f"No valid community payloads found after processing.")
-            return json.dumps({"file_path": None, "payload_count": 0})
-
-        # Generate timestamp for the directory and file name
-        timestamp_str = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-
-        # Define the directory and ensure it exists
-        directory = f"/home/bryananthonyobrien/mysite/data/community/imports/{username}/{timestamp_str}"
-        os.makedirs(directory, exist_ok=True)
-
-        # Construct the file name and full path
-        file_name = f"community_payloads_sent_{username}_{timestamp_str}.json"
-        full_file_path = os.path.join(directory, file_name)
-
-        # Write the valid payloads and timestamps to a JSON file in pretty format
-        with open(full_file_path, 'w') as json_file:
-            json.dump(payloads, json_file, indent=4)
-
-        app_logger.info(f"Exported {valid_payloads} valid community payloads to {full_file_path}")
-
-        # Return the full file path and payload count as a JSON structure
-        return json.dumps({"file_path": full_file_path, "payload_count": valid_payloads})
-
-    except Exception as e:
-        app_logger.error(f"Error exporting community payloads to JSON: {str(e)}")
-        return json.dumps({"file_path": None, "payload_count": 0})
-
-def view_community_payloads(limit=10):
-    """
-    Fetch and return the first 'limit' community_payload_* entries from Redis.
-    """
-    try:
-        redis_client = get_redis_client()
-        result = {}
-        for key in redis_client.scan_iter(match="community_payload_*", count=limit):
-            result[key.decode('utf-8')] = redis_client.hgetall(key)
-            if len(result) >= limit:
-                break
-        app_logger.info(f"Fetched {len(result)} community payloads.")
-        return result
-    except Exception as e:
-        app_logger.error(f"Error fetching community payloads: {str(e)}")
-        return None
-
-def delete_community_payloads():
-    """
-    Delete all keys matching the pattern 'community_payload_*'.
-    """
-    try:
-        redis_client = get_redis_client()
-        keys = redis_client.scan_iter(match="community_payload_*")
-        deleted_keys = []
-        for key in keys:
-            redis_client.delete(key)
-            deleted_keys.append(key.decode('utf-8'))
-        app_logger.info(f"Deleted {len(deleted_keys)} community payload keys.")
-        return deleted_keys
-    except Exception as e:
-        app_logger.error(f"Error deleting community payloads: {str(e)}")
-        return None
-
 def get_redis_client():
     return Redis(
         host=os.getenv('REDIS_HOST', 'localhost'),
@@ -156,36 +41,71 @@ def initialize_user_cache(username, password, role='client', login_attempts=0, l
     try:
         redis_client = get_redis_client()
 
-        # Check for existence of global revoked_tokens and issued_tokens sets, create if they don't exist
-        revoked_tokens_key = "revoked_tokens"
-        issued_tokens_key = "issued_tokens"
+        # Use per-user revoked_tokens and issued_tokens sets
+        revoked_tokens_key = f"revoked_tokens:{username}"
+        issued_tokens_key = f"issued_tokens:{username}"
 
-        # Check and create revoked_tokens set if it doesn't exist
-        if not redis_client.exists(revoked_tokens_key):
-            redis_client.sadd(revoked_tokens_key, '')  # Initialize with an empty value if not exists
-            app_logger.info(f"Created global Redis set for {revoked_tokens_key}.")
+        # 🔄 Cleanup expired revoked tokens BEFORE initializing
+        if redis_client.exists(revoked_tokens_key):
+            revoked_tokens = redis_client.smembers(revoked_tokens_key)
+            current_time = datetime.utcnow()
+            valid_tokens = set()
 
-        # Check and create issued_tokens set if it doesn't exist
+            for jti in revoked_tokens:
+                try:
+                    token_data = json.loads(jti.decode('utf-8'))  # Convert from bytes & parse JSON
+                    expires_at = token_data.get('expires_at')
+
+                    # If there's no expiration, assume it's a permanent token (skip it)
+                    if not expires_at:
+                        valid_tokens.add(jti)
+                        continue
+
+                    expiry_time = datetime.fromisoformat(expires_at)
+                    
+                    if expiry_time > current_time:
+                        valid_tokens.add(jti)  # Keep valid tokens
+                    else:
+                        app_logger.info(f"🗑️ Removing expired revoked token {jti} for user {username} (expired at {expires_at})")
+
+                except (json.JSONDecodeError, ValueError) as e:
+                    app_logger.warning(f"⚠️ Error decoding revoked token for {username}, skipping: {str(e)}")
+
+            # Replace revoked tokens with only the valid ones
+            redis_client.delete(revoked_tokens_key)
+            if valid_tokens:
+                redis_client.sadd(revoked_tokens_key, *valid_tokens)
+                app_logger.info(f"✅ Cleaned revoked tokens for {username}. Preserved {len(valid_tokens)} valid tokens.")
+            else:
+                app_logger.info(f"✅ Cleaned all expired revoked tokens for {username}.")
+
+        else:
+            redis_client.sadd(revoked_tokens_key, '')  # Initialize if it doesn't exist
+            app_logger.info(f"Created per-user Redis set for {revoked_tokens_key}.")
+
+        # ✅ Preserve issued tokens (Do NOT delete)
         if not redis_client.exists(issued_tokens_key):
-            redis_client.sadd(issued_tokens_key, '')  # Initialize with an empty value if not exists
-            app_logger.info(f"Created global Redis set for {issued_tokens_key}.")
+            redis_client.sadd(issued_tokens_key, '')  # Initialize with an empty value
+            app_logger.info(f"Created per-user Redis set for {issued_tokens_key}.")
+        else:
+            app_logger.info(f"⚠️ Found issued tokens for {username}.")
 
-        # Prepare the user data dictionary with all the necessary attributes
+        # Prepare the user data dictionary with all necessary attributes
         user_data = {
             "password": password,  # Store the hashed password
             "role": role,
             "login_attempts": login_attempts,
-            "last_login_attempt": last_login_attempt if last_login_attempt else '',  # Default to empty string if None
+            "last_login_attempt": last_login_attempt if last_login_attempt else '',
             "credits": credits,
             "user_status": user_status,
             "is_logged_in_now": is_logged_in_now,
-            "created": created if created else datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')  # Default to current timestamp if None
+            "created": created if created else datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
         }
 
         # Store all this data in Redis using hset (for hash values)
         redis_client.hset(username, mapping=user_data)  # Store user data in Redis
 
-        # Store the user's limits in Redis hash (passed as arguments)
+        # Store the user's limits in Redis hash
         limits = {
             "daily_limit": daily_limit,
             "hourly_limit": hourly_limit,
@@ -196,23 +116,24 @@ def initialize_user_cache(username, password, role='client', login_attempts=0, l
         # Initialize the user's credit_changes as an empty list (if no changes yet)
         redis_client.delete(f"{username}:credit_changes")  # Clean up if it exists already
         redis_client.lpush(
-    		f"{username}:credit_changes",
-   			 json.dumps({
-        		"username": username,
-       			"amount": credits,
-       			"source": "initial",
-        		"transaction_id": "0",
-        		"change_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-    		})
-		)
+            f"{username}:credit_changes",
+            json.dumps({
+                "username": username,
+                "amount": credits,
+                "source": "initial",
+                "transaction_id": "0",
+                "change_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            })
+        )
+
         # Log the initialization of the user's cache in Redis
         app_logger.info(f"Cache initialized for user: {username} with all attributes.")
         app_logger.info(f"Limits set for user {username}: Daily={daily_limit}, Hourly={hourly_limit}, Minute={minute_limit}")
         app_logger.info(f"Initial credits set for user {username}.")
 
     except Exception as e:
-        app_logger.error(f"Error initializing cache for user {username}: {str(e)}")
-      
+        app_logger.error(f"❌ Error initializing cache for user {username}: {str(e)}")
+     
 def suspend_user_cache(username):
     try:
         redis_client = get_redis_client()
@@ -221,9 +142,9 @@ def suspend_user_cache(username):
             redis_client.hmset(username, {'user_status': 'suspended'})  # Changed status to user_status
             app_logger.info(f"Cache updated for suspended user: {username}")
         else:
-            app_logger.warning(f"User {username} not found in cache when trying to suspend.")
+            app_logger.info(f"User {username} not found in cache when trying to suspend.")
     except Exception as e:
-        app_logger.error(f"Error suspending user cache for {username}: {str(e)}")
+        app_logger.info(f"Error suspending user cache for {username}: {str(e)}")
 
 def unsuspend_user_cache(username):
     try:
@@ -233,19 +154,9 @@ def unsuspend_user_cache(username):
             redis_client.hmset(username, {'user_status': 'active'})  # Changed status to user_status
             app_logger.info(f"Cache updated for unsuspended user: {username}")
         else:
-            app_logger.warning(f"User {username} not found in cache when trying to unsuspend.")
+            app_logger.info(f"User {username} not found in cache when trying to unsuspend.")
     except Exception as e:
-        app_logger.error(f"Error unsuspending user cache for {username}: {str(e)}")
-
-def remove_user_from_cache(user_id):
-    try:
-        redis_client = get_redis_client()
-        redis_client.delete(user_id)
-        app_logger.info(f"User {user_id} removed from cache successfully.")
-    except redis_exceptions.ConnectionError as e:
-        app_logger.error(f"Redis connection error in remove_user_from_cache: {str(e)}")
-    except Exception as e:
-        app_logger.error(f"Error removing user from cache: {str(e)}")
+        app_logger.info(f"Error unsuspending user cache for {username}: {str(e)}")
 
 def convert_to_epoch(timestamp_str):
     """Converts ISO formatted timestamp to epoch time."""
@@ -279,93 +190,6 @@ def format_time_difference(time_diff_seconds):
     minutes = time_diff_seconds // 60
     seconds = time_diff_seconds % 60
     return f"{int(days)} days, {int(hours)} hours, {int(minutes)} minutes, {int(seconds)} seconds"
-
-def process_phone_epochs(phone_epochs):
-    member_first_diffs = []
-    profile_first_diffs = []
-    member_first_epochs = {}
-    profile_first_epochs = {}
-
-    # Time intervals in seconds
-    hour_in_seconds = 3600
-    day_in_seconds = 24 * 3600
-    week_in_seconds = 7 * day_in_seconds
-    month_in_seconds = 30 * day_in_seconds
-
-    # Time range counters
-    member_time_ranges = {'< 1 hour': 0, '< 1 day': 0, '< 1 week': 0, '< 1 month': 0, '>= 1 month': 0}
-    profile_time_ranges = {'< 1 hour': 0, '< 1 day': 0, '< 1 week': 0, '< 1 month': 0, '>= 1 month': 0}
-
-    # Iterate over phone_epochs and calculate time differences
-    for phone, epochs in phone_epochs.items():
-        time_diff_seconds = abs(epochs['member_activated_epoch'] - epochs['profile_created_epoch'])
-
-        # Determine if the member or profile came first
-        if epochs['member_activated_epoch'] > epochs['profile_created_epoch']:
-            profile_first_diffs.append(time_diff_seconds)
-            profile_first_epochs[time_diff_seconds] = (phone, epochs['member_activated_epoch'], epochs['profile_created_epoch'])
-
-            # Categorize time difference for profile first
-            if time_diff_seconds < hour_in_seconds:
-                profile_time_ranges['< 1 hour'] += 1
-            elif time_diff_seconds < day_in_seconds:
-                profile_time_ranges['< 1 day'] += 1
-            elif time_diff_seconds < week_in_seconds:
-                profile_time_ranges['< 1 week'] += 1
-            elif time_diff_seconds < month_in_seconds:
-                profile_time_ranges['< 1 month'] += 1
-            else:
-                profile_time_ranges['>= 1 month'] += 1
-        else:
-            member_first_diffs.append(time_diff_seconds)
-            member_first_epochs[time_diff_seconds] = (phone, epochs['member_activated_epoch'], epochs['profile_created_epoch'])
-
-            # Categorize time difference for member first
-            if time_diff_seconds < hour_in_seconds:
-                member_time_ranges['< 1 hour'] += 1
-            elif time_diff_seconds < day_in_seconds:
-                member_time_ranges['< 1 day'] += 1
-            elif time_diff_seconds < week_in_seconds:
-                member_time_ranges['< 1 week'] += 1
-            elif time_diff_seconds < month_in_seconds:
-                member_time_ranges['< 1 month'] += 1
-            else:
-                member_time_ranges['>= 1 month'] += 1
-
-    # Calculate statistics
-    member_first_stats = calculate_time_stats(member_first_diffs)
-    profile_first_stats = calculate_time_stats(profile_first_diffs)
-
-    # Output the statistics
-    print("\nMember came first stats:")
-    if member_first_stats:
-        print(f"  Average: {format_time_difference(member_first_stats[0])}")
-        print(f"  Minimum: {format_time_difference(member_first_stats[1])} (Phone Epoch: {member_first_epochs[member_first_stats[1]]})")
-        print(f"  Maximum: {format_time_difference(member_first_stats[2])} (Phone Epoch: {member_first_epochs[member_first_stats[2]]})")
-    else:
-        print("  No data available for members first.")
-
-    print("\nProfile came first stats:")
-    if profile_first_stats:
-        print(f"  Average: {format_time_difference(profile_first_stats[0])}")
-        print(f"  Minimum: {format_time_difference(profile_first_stats[1])} (Phone Epoch: {profile_first_epochs[profile_first_stats[1]]})")
-        print(f"  Maximum: {format_time_difference(profile_first_stats[2])} (Phone Epoch: {profile_first_epochs[profile_first_stats[2]]})")
-    else:
-        print("  No data available for profiles first.")
-
-    # Calculate percentages for member first and profile first time ranges
-    total_member_first = len(member_first_diffs)
-    total_profile_first = len(profile_first_diffs)
-
-    print("\nMember came first time ranges:")
-    for range_label, count in member_time_ranges.items():
-        percentage = (count / total_member_first * 100) if total_member_first > 0 else 0
-        print(f"  {range_label}: {count} ({percentage:.2f}%)")
-
-    print("\nProfile came first time ranges:")
-    for range_label, count in profile_time_ranges.items():
-        percentage = (count / total_profile_first * 100) if total_profile_first > 0 else 0
-        print(f"  {range_label}: {count} ({percentage:.2f}%)")
 
 from collections import defaultdict
 
@@ -418,9 +242,9 @@ def clash_members_and_profiles(username):
                 if phone_number:
                     profiles_by_phone[phone_number] = profile
             except json.JSONDecodeError as json_error:
-                app_logger.error(f"JSON decoding error for profile {profile_key}: {json_error}")
+                app_logger.info(f"JSON decoding error for profile {profile_key}: {json_error}")
             except Exception as e:
-                app_logger.error(f"Unexpected error processing profile {profile_key}: {str(e)}")
+                app_logger.info(f"Unexpected error processing profile {profile_key}: {str(e)}")
 
         # Initialize statistics and MEMBER_ID sets
         matched_members = 0
@@ -480,11 +304,11 @@ def clash_members_and_profiles(username):
                         member_ids_by_state['non_matched_opted_out'].add(member_id)
 
             except json.JSONDecodeError as json_error:
-                app_logger.error(f"JSON decoding error for member {member_key}: {json_error}")
+                app_logger.info(f"JSON decoding error for member {member_key}: {json_error}")
             except KeyError as key_error:
-                app_logger.error(f"Missing expected key {str(key_error)} in member data for {member_key}")
+                app_logger.info(f"Missing expected key {str(key_error)} in member data for {member_key}")
             except Exception as e:
-                app_logger.error(f"Unexpected error processing member {member_key}: {str(e)}")
+                app_logger.info(f"Unexpected error processing member {member_key}: {str(e)}")
 
         app_logger.info("Prepare response data with success True")
         response_data = {
@@ -511,594 +335,12 @@ def clash_members_and_profiles(username):
         return response_data
 
     except redis.exceptions.ConnectionError as e:
-        app_logger.error(f"Redis connection error: {str(e)}")
+        app_logger.info(f"Redis connection error: {str(e)}")
         return {'success': False, 'message': 'Redis connection error'}
 
     except Exception as e:
-        app_logger.error(f"Error in clash_members_and_profiles: {str(e)}")
+        app_logger.info(f"Error in clash_members_and_profiles: {str(e)}")
         return {'success': False, 'message': 'Internal server error'}
-
-def check_members_profiles_stats(username):
-    try:
-        redis_client = get_redis_client()
-
-        # Keys for members and profiles
-        members_key = f"members_{username}"
-        profiles_key = f"profiles_{username}"
-
-        # Check if both keys exist in Redis
-        if not redis_client.exists(members_key) or not redis_client.exists(profiles_key):
-            print(f"Either {members_key} or {profiles_key} does not exist.")
-            return
-
-        # Fetch all members and profiles
-        members_data = redis_client.hgetall(members_key)
-        profiles_data = redis_client.hgetall(profiles_key)
-
-        # Prepare for matching members to profiles by phone number
-        def normalize_phone_number(phone_number):
-            """Normalize phone number by removing non-digit characters."""
-            if isinstance(phone_number, str):  # Check if phone_number is a string
-                return re.sub(r'\D', '', phone_number)
-            return ''  # Return an empty string if not a valid string
-
-        # Create a mapping of phone number to profile data for easy lookup
-        profiles_by_phone = {}
-        unmatched_profiles = []
-        for profile_key, profile_data in profiles_data.items():
-            profile = json.loads(profile_data.decode('utf-8'))
-            phone_number = normalize_phone_number(profile.get('phone_number', ''))
-            if phone_number:
-                profiles_by_phone[phone_number] = profile
-            else:
-                unmatched_profiles.append(profile)  # Profiles with no phone number
-
-        # Initialize statistics
-        matched_members = 0
-        total_members = len(members_data)
-        total_profiles = len(profiles_data)  # Total number of profiles
-        deleted_members = 0
-        profile_came_first = 0
-        member_came_first = 0
-        equal_timestamps = 0  # Counter for equal timestamps
-        missing_timestamps = 0  # Counter for missing timestamps
-        missing_timestamps_data = []  # Store data for first 10 missing timestamps
-        phone_epochs = {}  # Dictionary to store phone number and their epochs
-
-        earliest_profile_created = None
-        earliest_member_activated = None
-
-        subscription_state_counts = defaultdict(int)
-        matched_subscription_state_counts = defaultdict(int)  # To count matched members by subscription state
-        non_profile_members = 0  # Count of members who are not profiles
-        non_matched_subscription_state_counts = defaultdict(int)  # Track for non-matched members
-
-        # Buckets for Accepts Marketing (0, 1, 2) with and without phone numbers
-        matched_accepts_marketing_buckets = {
-            '0_with_phone': defaultdict(int),  # Nested defaultdict for subscription state
-            '0_without_phone': defaultdict(int),
-            '1_with_phone': defaultdict(int),
-            '1_without_phone': defaultdict(int),
-            '2_with_phone': defaultdict(int),
-            '2_without_phone': defaultdict(int),
-        }
-
-        all_accepts_marketing_buckets = {
-            '0_with_phone': 0,
-            '0_without_phone': 0,
-            '1_with_phone': 0,
-            '1_without_phone': 0,
-            '2_with_phone': 0,
-            '2_without_phone': 0,
-        }
-
-        # Iterate over members and attempt to find matching profiles by phone number
-        for member_key, member_data in members_data.items():
-            member = json.loads(member_data.decode('utf-8'))
-            member_phone = normalize_phone_number(member.get('PHONE_NUMBER', ''))
-            subscription_state = member.get('SUBSCRIPTION_STATE', 'unknown')
-
-            # Extract FIRST_ACTIVATED_AT from the member, or leave blank if missing
-            member_activated_at = member.get('FIRST_ACTIVATED_AT', '') or 'N/A'
-
-            # Count total subscription states
-            subscription_state_counts[subscription_state] += 1
-
-            # Count deleted members
-            if subscription_state == 'deleted':
-                deleted_members += 1
-                continue  # Skip further checks for deleted members
-
-            # If we find a matching profile
-            if member_phone in profiles_by_phone:
-                matched_members += 1
-                matched_subscription_state_counts[subscription_state] += 1  # Count matched member's subscription state
-
-                # Get the matching profile
-                profile = profiles_by_phone[member_phone]
-                # Extract Created from the profile, or leave blank if missing
-                profile_created_at = profile.get('created', '') or 'N/A'
-                profile_accepts_marketing = profile.get('accepts_marketing', None)
-
-                # Convert timestamps to epoch (as longs)
-                member_activated_epoch = convert_to_epoch(member_activated_at) if member_activated_at != 'N/A' else 'N/A'
-                profile_created_epoch = convert_to_epoch(profile_created_at) if profile_created_at != 'N/A' else 'N/A'
-
-                # Update the earliest profile created and member activated timestamps
-                if profile_created_epoch != 'N/A' and (earliest_profile_created is None or profile_created_epoch < earliest_profile_created):
-                    earliest_profile_created = profile_created_epoch
-
-                if member_activated_epoch != 'N/A' and (earliest_member_activated is None or member_activated_epoch < earliest_member_activated):
-                    earliest_member_activated = member_activated_epoch
-
-                # Handle missing or invalid timestamps
-                if member_activated_epoch == 'N/A' or profile_created_epoch == 'N/A':
-                    # Only consider members where subscription_state is NOT opted_out
-                    if subscription_state != 'opted_out' and len(missing_timestamps_data) < 10:
-                        missing_timestamps_data.append({
-                            'member_data': member,
-                            'profile_data': profile
-                        })
-                    missing_timestamps += 1
-                else:
-                    # Compare epochs and increment counters
-                    if member_activated_epoch == profile_created_epoch:
-                        equal_timestamps += 1
-                    elif member_activated_epoch > profile_created_epoch:
-                        profile_came_first += 1
-                    else:
-                        member_came_first += 1
-
-                    # Store the phone number with the two epochs
-                    phone_epochs[member_phone] = {
-                        'member_activated_epoch': member_activated_epoch,
-                        'profile_created_epoch': profile_created_epoch
-                    }
-
-                # Update the Accepts Marketing buckets for matched profiles, breakout by SUBSCRIPTION_STATE
-                if profile_accepts_marketing == 0:
-                    matched_accepts_marketing_buckets['0_with_phone'][subscription_state] += 1
-                elif profile_accepts_marketing == 1:
-                    matched_accepts_marketing_buckets['1_with_phone'][subscription_state] += 1
-                else:
-                    matched_accepts_marketing_buckets['2_with_phone'][subscription_state] += 1
-
-            else:
-                non_profile_members += 1  # Count members who do not have a matching profile
-                non_matched_subscription_state_counts[subscription_state] += 1  # Track subscription state for non-matched members
-
-        unmatched_with_phone = 0  # Count of unmatched profiles with phone numbers
-        for profile_key, profile_data in profiles_data.items():
-            profile = json.loads(profile_data.decode('utf-8'))
-            profile_created_at = profile.get('created', '') or 'N/A'
-            profile_phone_number = normalize_phone_number(profile.get('phone_number', ''))
-            profile_accepts_marketing = profile.get('accepts_marketing', None)
-
-            # Update the Accepts Marketing buckets for unmatched profiles
-            if profile_key not in phone_epochs:  # Profile is unmatched
-                if profile_accepts_marketing == 0:
-                    if profile_phone_number:
-                        all_accepts_marketing_buckets['0_with_phone'] += 1
-                    else:
-                        all_accepts_marketing_buckets['0_without_phone'] += 1
-                elif profile_accepts_marketing == 1:
-                    if profile_phone_number:
-                        all_accepts_marketing_buckets['1_with_phone'] += 1
-                    else:
-                        all_accepts_marketing_buckets['1_without_phone'] += 1
-                else:
-                    if profile_phone_number:
-                        all_accepts_marketing_buckets['2_with_phone'] += 1
-                    else:
-                        all_accepts_marketing_buckets['2_without_phone'] += 1
-
-        # Output statistics
-        print(f"Total members: {total_members} (including deleted)")
-        print(f"Total profiles: {total_profiles}")  # Added total profiles count
-        print(f"Total members that are also profiles (matching phone numbers): {matched_members}")
-        print(f"Total deleted members: {deleted_members}")
-        print(f"Total members that are not profiles: {non_profile_members}")
-        print(f"Total members that are not deleted: {total_members - deleted_members}")
-
-        # Output the total member breakdown by SUBSCRIPTION_STATE
-        print("\n--- Breakdown of Total Members by SUBSCRIPTION_STATE ---")
-        for state, count in subscription_state_counts.items():
-            print(f"  {state}: {count}")
-
-        # Output the breakdown of matched members by SUBSCRIPTION_STATE
-        print("\n--- Breakdown of Matched Members by SUBSCRIPTION_STATE ---")
-        for state, count in matched_subscription_state_counts.items():
-            print(f"  {state}: {count}")
-
-        # Output the breakdown of non-matched members by SUBSCRIPTION_STATE
-        print("\n--- Breakdown of Non-Matched Members by SUBSCRIPTION_STATE ---")
-        for state, count in non_matched_subscription_state_counts.items():
-            print(f"  {state}: {count}")
-
-
-        # Output the new buckets for matched profiles, broken out by SUBSCRIPTION_STATE
-        print("\n--- Matched Accepts Marketing Buckets by SUBSCRIPTION_STATE ---")
-        for state, count in matched_accepts_marketing_buckets['0_with_phone'].items():
-            print(f"  Accepts marketing (0) with phone, {state}: {count}")
-        for state, count in matched_accepts_marketing_buckets['1_with_phone'].items():
-            print(f"  Accepts marketing (1) with phone, {state}: {count}")
-        for state, count in matched_accepts_marketing_buckets['2_with_phone'].items():
-            print(f"  Accepts marketing (2) with phone, {state}: {count}")
-
-        # Output the new buckets for all profiles
-        print("\n--- All Accepts Marketing Buckets ---")
-        print(f"  Accepts marketing (0) with phone: {all_accepts_marketing_buckets['0_with_phone']}")
-        print(f"  Accepts marketing (0) without phone: {all_accepts_marketing_buckets['0_without_phone']}")
-        print(f"  Accepts marketing (1) with phone: {all_accepts_marketing_buckets['1_with_phone']}")
-        print(f"  Accepts marketing (1) without phone: {all_accepts_marketing_buckets['1_without_phone']}")
-        print(f"  Accepts marketing (2) with phone: {all_accepts_marketing_buckets['2_with_phone']}")
-        print(f"  Accepts marketing (2) without phone: {all_accepts_marketing_buckets['2_without_phone']}")
-
-        # Process the phone_epochs to calculate time statistics
-        process_phone_epochs(phone_epochs)
-        process_cohort_stats(phone_epochs, earliest_member_activated if earliest_member_activated else float('inf'))
-
-    except redis.exceptions.ConnectionError as e:
-        print(f"Redis connection error: {str(e)}")
-    except Exception as e:
-        print(f"Error in check_members_profiles_stats: {str(e)}")
-
-def process_cohort_stats(phone_epochs, first_member_epoch):
-    # Two cohorts: after and before first community member
-    after_first_member_profile_first_diffs = []
-    after_first_member_member_first_diffs = []
-    before_first_member_profile_first_diffs = []
-    before_first_member_member_first_diffs = []
-
-    after_first_member_stats = {'profile_came_first': 0, 'member_came_first': 0}
-    before_first_member_stats = {'profile_came_first': 0, 'member_came_first': 0}
-
-    # Iterate over phone_epochs and calculate time differences
-    for phone, epochs in phone_epochs.items():
-        time_diff_seconds = abs(epochs['member_activated_epoch'] - epochs['profile_created_epoch'])
-
-        # Determine if the member or profile came first
-        if epochs['profile_created_epoch'] > first_member_epoch:
-            # Profiles created after first community member
-            if epochs['member_activated_epoch'] > epochs['profile_created_epoch']:
-                after_first_member_profile_first_diffs.append(time_diff_seconds)
-                after_first_member_stats['profile_came_first'] += 1
-            else:
-                after_first_member_member_first_diffs.append(time_diff_seconds)
-                after_first_member_stats['member_came_first'] += 1
-        else:
-            # Profiles created before first community member
-            if epochs['member_activated_epoch'] > epochs['profile_created_epoch']:
-                before_first_member_profile_first_diffs.append(time_diff_seconds)
-                before_first_member_stats['profile_came_first'] += 1
-            else:
-                before_first_member_member_first_diffs.append(time_diff_seconds)
-                before_first_member_stats['member_came_first'] += 1
-
-    # Calculate statistics for both cohorts
-    after_first_member_profile_first_stats = calculate_time_stats(after_first_member_profile_first_diffs)
-    after_first_member_member_first_stats = calculate_time_stats(after_first_member_member_first_diffs)
-    before_first_member_profile_first_stats = calculate_time_stats(before_first_member_profile_first_diffs)
-    before_first_member_member_first_stats = calculate_time_stats(before_first_member_member_first_diffs)
-
-    # Output the statistics for cohort 1 (profiles created after the first community member)
-    print("\nCohort 1: Profiles created **after** the first community member (after September 2, 2022)")
-    print(f"Profile came first: {after_first_member_stats['profile_came_first']}")
-    print(f"Member came first: {after_first_member_stats['member_came_first']}")
-
-    if after_first_member_member_first_diffs:
-        print("\nMember came first stats (after cohort):")
-        print(f"  Average: {format_time_difference(after_first_member_member_first_stats[0])}")
-        print(f"  Minimum: {format_time_difference(after_first_member_member_first_stats[1])}")
-        print(f"  Maximum: {format_time_difference(after_first_member_member_first_stats[2])}")
-    else:
-        print("  No data available for members first in this cohort.")
-
-    if after_first_member_profile_first_diffs:
-        print("\nProfile came first stats (after cohort):")
-        print(f"  Average: {format_time_difference(after_first_member_profile_first_stats[0])}")
-        print(f"  Minimum: {format_time_difference(after_first_member_profile_first_stats[1])}")
-        print(f"  Maximum: {format_time_difference(after_first_member_profile_first_stats[2])}")
-    else:
-        print("  No data available for profiles first in this cohort.")
-
-    # Output the statistics for cohort 2 (profiles created before the first community member)
-    print("\nCohort 2: Profiles created **before** the first community member (before September 2, 2022)")
-    print(f"Profile came first: {before_first_member_stats['profile_came_first']}")
-    print(f"Member came first: {before_first_member_stats['member_came_first']}")
-
-    if before_first_member_member_first_diffs:
-        print("\nMember came first stats (before cohort):")
-        print(f"  Average: {format_time_difference(before_first_member_member_first_stats[0])}")
-        print(f"  Minimum: {format_time_difference(before_first_member_member_first_stats[1])}")
-        print(f"  Maximum: {format_time_difference(before_first_member_member_first_stats[2])}")
-    else:
-        print("  No data available for members first in this cohort.")
-
-    if before_first_member_profile_first_diffs:
-        print("\nProfile came first stats (before cohort):")
-        print(f"  Average: {format_time_difference(before_first_member_profile_first_stats[0])}")
-        print(f"  Minimum: {format_time_difference(before_first_member_profile_first_stats[1])}")
-        print(f"  Maximum: {format_time_difference(before_first_member_profile_first_stats[2])}")
-    else:
-        print("  No data available for profiles first in this cohort.")
-
-def print_cache_contents():
-    try:
-        redis_client = get_redis_client()
-        keys = redis_client.keys('*')  # Get all keys from the Redis cache
-
-        if not keys:
-            print("Cache is empty.")
-            return
-
-        # Column headers for profiles
-        profile_column_headers = [
-            'Email', 'Phone Number', 'First Name', 'Last Name',
-            'City', 'Country', 'Region', 'Zip',
-            'Latitude', 'Longitude', 'Accepts Marketing', 'Created', 'Birthday', 'Gender'
-        ]
-
-        # Column headers for SMS profiles
-        sms_profile_column_headers = [
-            'Email', 'Phone Number', 'First Name', 'Last Name',
-            'City', 'Country', 'Region', 'Zip',
-            'Address 1', 'Address 2', 'Latitude', 'Longitude',
-            'Created', 'Dummy Email', 'Birthday', 'Gender'
-        ]
-
-        member_column_headers = [
-            "MEMBER_ID", "LEADER_ID", "CHANNEL", "PHONE_NUMBER",
-            "SUBSCRIPTION_STATE", "FIRST_NAME", "LAST_NAME",
-            "EMAIL", "DATE_OF_BIRTH", "GENDER", "CITY",
-            "ZIP_CODE", "STATE", "STATE_CODE", "COUNTRY",
-            "COUNTRY_CODE", "DEVICE_TYPE", "FIRST_ACTIVATED_AT"
-        ]
-
-        redis_keys_summary = []
-        usernames = set()  # Use a set to avoid duplicates
-
-        for key in keys:
-            key_str = key.decode('utf-8')
-
-            # Handle 'profiles_<username>' keys
-            if key_str.startswith('profiles_'):
-                key_type = redis_client.type(key).decode('utf-8')
-                if key_type == 'hash':
-                    user_data = redis_client.hgetall(key)
-
-                    # Calculate max width for each column based on the first 10 records and headers
-                    max_lengths = {header: len(header) for header in profile_column_headers}
-                    first_ten = redis_client.hscan_iter(key, count=10)
-                    for idx, (profile_key, profile_data) in enumerate(first_ten, start=1):
-                        if idx > 10:
-                            break
-                        profile = json.loads(profile_data.decode('utf-8'))  # Assuming the profile is stored as JSON
-
-                        # Ensure all profile attributes are considered
-                        for header in profile_column_headers:
-                            value = profile.get(header.lower().replace(' ', '_'), '')  # Default to empty string
-                            max_lengths[header] = max(max_lengths[header], len(str(value)))
-
-                    # Create a format string with dynamic column widths
-                    profile_format = "|" + "|".join([f"{{:<{max_lengths[header]}}}" for header in profile_column_headers]) + "|"
-
-                    # Print header divider
-                    print("-" * (sum(max_lengths.values()) + len(profile_column_headers) + 1))
-
-                    # Print headers
-                    print(profile_format.format(*profile_column_headers))
-                    print("-" * (sum(max_lengths.values()) + len(profile_column_headers) + 1))
-
-                    # Display the first 10 profiles
-                    first_ten = redis_client.hscan_iter(key, count=10)
-                    for idx, (profile_key, profile_data) in enumerate(first_ten, start=1):
-                        if idx > 10:
-                            break
-                        profile = json.loads(profile_data.decode('utf-8'))  # Assuming the profile is stored as JSON
-
-                        # Ensure accepts_marketing is handled correctly
-                        accepts_marketing = profile.get('accepts_marketing', 'N/A')  # Default to 'N/A' if not found
-
-                        row_data = [
-                            profile.get('email', '') or '',
-                            profile.get('phone_number', '') or '',
-                            profile.get('first_name', '') or '',
-                            profile.get('last_name', '') or '',
-                            profile.get('city', '') or '',
-                            profile.get('country', '') or '',
-                            profile.get('region', '') or '',
-                            profile.get('zip', '') or '',
-                            profile.get('latitude', '') or '',
-                            profile.get('longitude', '') or '',
-                            accepts_marketing,  # Use the determined variable here
-                            profile.get('created', '') or '',
-                            profile.get('birthday', '') or '',
-                            profile.get('gender', '') or ''
-                        ]
-                        print(profile_format.format(*row_data))
-
-                    # Print footer divider after the last row (10)
-                    print("-" * (sum(max_lengths.values()) + len(profile_column_headers) + 1))
-
-                    # Add username to the set
-                    username = key_str.split('_', 1)[1]  # Extract username from 'profiles_<username>'
-                    usernames.add(username)
-
-                    # Space between the tables
-                    print("\n")
-
-            # Handle 'sms_profiles_eligible_to_import_to_community_<username>' keys
-            elif key_str.startswith('sms_profiles_eligible_to_import_to_community_'):
-                key_type = redis_client.type(key).decode('utf-8')
-                if key_type == 'hash':
-                    # Calculate max width for each column based on the fields
-                    max_lengths = {header: len(header) for header in sms_profile_column_headers}  # Using SMS headers for formatting
-                    first_ten = redis_client.hscan_iter(key, count=10)
-
-                    for idx, (profile_key, profile_data) in enumerate(first_ten, start=1):
-                        if idx > 10:
-                            break
-                        profile = json.loads(profile_data.decode('utf-8'))  # Assuming the profile is stored as JSON
-
-                        # Ensure all SMS profile attributes are considered
-                        for header in sms_profile_column_headers:
-                            value = profile.get(header.lower().replace(' ', '_'), '')  # Default to empty string
-                            max_lengths[header] = max(max_lengths[header], len(str(value)))
-
-                    # Create a format string with dynamic column widths
-                    sms_format = "|" + "|".join([f"{{:<{max_lengths[header]}}}" for header in sms_profile_column_headers]) + "|"
-
-                    # Print header divider
-                    print("-" * (sum(max_lengths.values()) + len(sms_profile_column_headers) + 1))
-
-                    # Print headers
-                    print(sms_format.format(*sms_profile_column_headers))
-                    print("-" * (sum(max_lengths.values()) + len(sms_profile_column_headers) + 1))
-
-                    # Display the first 10 SMS profiles
-                    first_ten = redis_client.hscan_iter(key, count=10)
-                    for idx, (profile_key, profile_data) in enumerate(first_ten, start=1):
-                        if idx > 10:
-                            break
-                        profile = json.loads(profile_data.decode('utf-8'))  # Assuming the profile is stored as JSON
-
-                        row_data = [
-                            profile.get('email', '') or '',
-                            profile.get('phone_number', '') or '',
-                            profile.get('first_name', '') or '',
-                            profile.get('last_name', '') or '',
-                            profile.get('city', '') or '',
-                            profile.get('country', '') or '',
-                            profile.get('region', '') or '',
-                            profile.get('zip', '') or '',
-                            profile.get('address1', '') or '',
-                            profile.get('address2', '') or '',
-                            profile.get('latitude', '') or '',
-                            profile.get('longitude', '') or '',
-                            profile.get('created', '') or '',
-                            profile.get('dummy_email', 'N/A') or '',  # Default to 'N/A' if not found
-                            profile.get('birthday', '') or '',
-                            profile.get('gender', '') or ''
-                        ]
-                        print(sms_format.format(*row_data))
-
-                    # Print footer divider after the last row (10)
-                    print("-" * (sum(max_lengths.values()) + len(sms_profile_column_headers) + 1))
-
-                    # Add username to the set
-                    username = key_str.split('_', 4)[4]  # Extract username from 'sms_profiles_eligible_to_import_to_community_<username>'
-                    usernames.add(username)
-
-            # Handle 'members_<username>' keys
-            elif key_str.startswith('members_'):
-                key_type = redis_client.type(key).decode('utf-8')
-                if key_type == 'hash':
-                    user_data = redis_client.hgetall(key)
-
-                    # Calculate max width for each column based on the first 10 records and headers
-                    max_lengths = {header: len(header) for header in member_column_headers}
-                    first_ten = redis_client.hscan_iter(key, count=10)
-                    for idx, (member_key, member_data) in enumerate(first_ten, start=1):
-                        if idx > 10:
-                            break
-                        member = json.loads(member_data.decode('utf-8'))  # Assuming the member is stored as JSON
-                        for header, field in zip(member_column_headers, ["MEMBER_ID", "LEADER_ID", "CHANNEL", "PHONE_NUMBER", "SUBSCRIPTION_STATE", "FIRST_NAME", "LAST_NAME", "EMAIL", "DATE_OF_BIRTH", "GENDER", "CITY", "ZIP_CODE", "STATE", "STATE_CODE", "COUNTRY", "COUNTRY_CODE", "DEVICE_TYPE", "FIRST_ACTIVATED_AT"]):
-                            value = member.get(field, '') or ''
-                            max_lengths[header] = max(max_lengths[header], len(str(value)))
-
-                    # Create a format string with dynamic column widths
-                    member_format = "|" + "|".join([f"{{:<{max_lengths[header]}}}" for header in member_column_headers]) + "|"
-
-                    # Print header divider
-                    print("-" * (sum(max_lengths.values()) + len(member_column_headers) + 1))
-
-                    # Print headers
-                    print(member_format.format(*member_column_headers))
-                    print("-" * (sum(max_lengths.values()) + len(member_column_headers) + 1))
-
-                    # Display the first 10 members
-                    first_ten = redis_client.hscan_iter(key, count=10)
-                    for idx, (member_key, member_data) in enumerate(first_ten, start=1):
-                        if idx > 10:
-                            break
-                        member = json.loads(member_data.decode('utf-8'))  # Assuming the member is stored as JSON
-                        row_data = [
-                            member.get("MEMBER_ID", '') or '',
-                            member.get("LEADER_ID", '') or '',
-                            member.get("CHANNEL", '') or '',
-                            member.get("PHONE_NUMBER", '') or '',
-                            member.get("SUBSCRIPTION_STATE", '') or '',
-                            member.get("FIRST_NAME", '') or '',
-                            member.get("LAST_NAME", '') or '',
-                            member.get("EMAIL", '') or '',
-                            member.get("DATE_OF_BIRTH", '') or '',
-                            member.get("GENDER", '') or '',
-                            member.get("CITY", '') or '',
-                            member.get("ZIP_CODE", '') or '',
-                            member.get("STATE", '') or '',
-                            member.get("STATE_CODE", '') or '',
-                            member.get("COUNTRY", '') or '',
-                            member.get("COUNTRY_CODE", '') or '',
-                            member.get("DEVICE_TYPE", '') or '',
-                            member.get("FIRST_ACTIVATED_AT", '') or ''
-                        ]
-                        print(member_format.format(*row_data))
-
-                    # Print footer divider after the last row (10)
-                    print("-" * (sum(max_lengths.values()) + len(member_column_headers) + 1))
-
-                    # Add username to the set
-                    username = key_str.split('_', 1)[1]  # Extract username from 'members_<username>'
-                    usernames.add(username)
-
-            # Collect all keys for inspection later
-            redis_keys_summary.append((key_str, redis_client.type(key).decode('utf-8')))
-
-        # Call check_members_profiles_stats for each extracted username
-        for username in usernames:
-            check_members_profiles_stats(username)  # Call the function to check stats for the extracted username
-
-        # Loop to allow key inspection or going back to the main menu
-        while True:
-            print("\nAvailable Redis Keys for Inspection:")
-            for idx, (key_str, key_type) in enumerate(redis_keys_summary, start=1):
-                print(f"{idx}. {key_str} (Type: {key_type})")
-
-            choice = input("\nEnter the number of the key you want to inspect (or 'b' to go back to main menu): ").strip()
-
-            if choice.lower() == 'b':
-                break
-
-            if not choice.isdigit() or int(choice) < 1 or int(choice) > len(redis_keys_summary):
-                print("Invalid choice. Please try again.")
-                continue
-
-            selected_key, selected_type = redis_keys_summary[int(choice) - 1]
-            print(f"\nInspecting Key: {selected_key} (Type: {selected_type})")
-
-            # Handle based on the type of the key
-            if selected_type == 'string':
-                value = redis_client.get(selected_key).decode('utf-8')
-                print(f"String Value: {value}")
-
-            elif selected_type == 'hash':
-                total_records = redis_client.hlen(selected_key)
-                print(f"Total records in hash: {total_records}")
-
-                # Fetch and display the first 10 records
-                first_ten = redis_client.hscan_iter(selected_key, count=10)
-                print("First 10 records in hash:\n")
-                for idx, (hash_key, hash_value) in enumerate(first_ten, start=1):
-                    print(f"{idx}. {hash_key.decode('utf-8')}: {hash_value.decode('utf-8')}")
-
-            else:
-                print(f"Type '{selected_type}' is not supported for detailed inspection.")
-
-    except redis.exceptions.ConnectionError as e:
-        print(f"Redis connection error: {str(e)}")
-    except Exception as e:
-        print(f"Error displaying cache contents: {str(e)}")
 
 def load_profiles_into_redis(profiles, base_redis_key, username):
     """
@@ -1205,7 +447,7 @@ def load_profiles_into_redis(profiles, base_redis_key, username):
         pretty_status_data = json.dumps(status_data, indent=4)  # Pretty format the JSON data
         app_logger.info(f"Initial status set in Redis under key {redis_status_key}:\n{pretty_status_data}")
     except Exception as e:
-        app_logger.error(f"Failed to set initial status in Redis: {e}")
+        app_logger.info(f"Failed to set initial status in Redis: {e}")
 
     app_logger.info("load_profiles_into_redis completed and returning")
 
@@ -1774,103 +1016,15 @@ def create_stage_csv_files(username, silent=False):
     except Exception as e:
         print(f"Error processing profiles: {str(e)}")
 
-def log_credit_change_old(username, amount, source, transaction_id='0'):
-    """
-    Log credit changes in a Redis list instead of an SQL table.
-    Each log entry is stored as a JSON string for easy parsing later.
-    """
-    try:
-        # Early exit if the amount is 0; no change to log
-        if amount == 0:
-            return
-
-        redis_client = get_redis_client()  # however you get your Redis client
-
-        # Build a structured record so you can parse it later
-        record = {
-            "amount": amount,
-            "source": source,
-            "transaction_id": transaction_id,
-            "change_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        }
-
-        # Push this record onto the credit_changes list for the user
-        redis_client.lpush(
-            f"{username}:credit_changes",
-            json.dumps(record)  # store as JSON string
-        )
-
-        app_logger.info(
-            f"Logged credit change in Redis for user {username}: "
-            f"amount={amount}, source={source}, transaction_id={transaction_id}"
-        )
-
-    except redis.RedisError as e:
-        app_logger.error(
-            f"Redis error logging credit change for user {username}: {e}"
-        )
-        raise
-    except Exception as e:
-        app_logger.error(
-            f"Unexpected error logging credit change for user {username}: {e}"
-        )
-        raise
-
 def get_user_data(user_id):
     global cache_status
-    with api_call_tracker_lock:
-        try:
-            redis_client = get_redis_client()
-            user_data = redis_client.hgetall(user_id)
+    try:
+        redis_client = get_redis_client()
+        user_data = redis_client.hgetall(user_id)
 
-            # If no data is found, return default values for all attributes
-            if not user_data:
-                user_data = {
-                    'api_calls': 0, 
-                    'credits': 0, 
-                    'user_status': 'active', 
-                    'password': None,
-                    'login_attempts': 0, 
-                    'last_login_attempt': 'None', 
-                    'is_logged_in_now': 0,
-                    'created': 'None', 
-                    'role': 'client'
-                }
-
-            # Ensure 'api_calls' is in the data
-            if 'api_calls' not in user_data:
-                user_data['api_calls'] = 0
-
-            # Decode all byte-encoded values and handle them appropriately
-            decoded_data = {}
-            for k, v in user_data.items():
-                # If the key is a byte string, decode it
-                decoded_key = k.decode('utf-8') if isinstance(k, bytes) else k
-                
-                # If the value is a byte string, decode it
-                if isinstance(v, bytes):
-                    decoded_value = v.decode('utf-8')  # Decode value to string
-                    # If it's a value we expect to be numeric, convert it to integer
-                    if decoded_key in ['login_attempts', 'credits', 'is_logged_in_now', 'api_calls']:
-                        try:
-                            decoded_value = int(decoded_value)
-                        except ValueError:
-                            decoded_value = 0  # Fallback to 0 if not convertible to integer
-                else:
-                    decoded_value = v
-
-                decoded_data[decoded_key] = decoded_value
-
-            # Now user_data is fully decoded and ready to be used
-            app_logger.debug(f"get_user_data: User: {user_id}, Decoded Data: {decoded_data}")
-
-            cache_status = "Cache Available"
-            return decoded_data, cache_status  # Return decoded data
-
-        except redis_exceptions.ConnectionError as e:
-            app_logger.error(f"Redis connection error in get_user_data: {str(e)}")
-            cache_status = "Cache Unavailable"
-            return {
+        # If no data is found, return default values for all attributes
+        if not user_data:
+            user_data = {
                 'api_calls': 0, 
                 'credits': 0, 
                 'user_status': 'active', 
@@ -1880,17 +1034,50 @@ def get_user_data(user_id):
                 'is_logged_in_now': 0,
                 'created': 'None', 
                 'role': 'client'
-            }, cache_status  # Fallback to default values
+            }
 
-def reset_user_data(user_id):
-    global cache_status
-    with api_call_tracker_lock:
-        try:
-            redis_client = get_redis_client()
-            app_logger.debug(f"Before reset - reset_user_data: {user_id}")
-            redis_client.hmset(user_id, {'api_calls': 0, 'credits': 0})
-            app_logger.debug(f"After reset - reset_user_data: {user_id} - API Calls: 0, Credits: 0")
-            cache_status = "Cache Available"
-        except redis_exceptions.ConnectionError as e:
-            app_logger.error(f"Redis connection error in reset_user_data: {str(e)}")
-            cache_status = "Cache Unavailable"
+        # Ensure 'api_calls' is in the data
+        if 'api_calls' not in user_data:
+            user_data['api_calls'] = 0
+
+        # Decode all byte-encoded values and handle them appropriately
+        decoded_data = {}
+        for k, v in user_data.items():
+            # If the key is a byte string, decode it
+            decoded_key = k.decode('utf-8') if isinstance(k, bytes) else k
+            
+            # If the value is a byte string, decode it
+            if isinstance(v, bytes):
+                decoded_value = v.decode('utf-8')  # Decode value to string
+                # If it's a value we expect to be numeric, convert it to integer
+                if decoded_key in ['login_attempts', 'credits', 'is_logged_in_now', 'api_calls']:
+                    try:
+                        decoded_value = int(decoded_value)
+                    except ValueError:
+                        decoded_value = 0  # Fallback to 0 if not convertible to integer
+            else:
+                decoded_value = v
+
+            decoded_data[decoded_key] = decoded_value
+
+        # Now user_data is fully decoded and ready to be used
+        app_logger.info(f"get_user_data: User: {user_id}, Decoded Data: {decoded_data}")
+
+        cache_status = "Cache Available"
+        return decoded_data, cache_status  # Return decoded data
+
+    except redis_exceptions.ConnectionError as e:
+        app_logger.info(f"Redis connection error in get_user_data: {str(e)}")
+        cache_status = "Cache Unavailable"
+        return {
+            'api_calls': 0, 
+            'credits': 0, 
+            'user_status': 'active', 
+            'password': None,
+            'login_attempts': 0, 
+            'last_login_attempt': 'None', 
+            'is_logged_in_now': 0,
+            'created': 'None', 
+            'role': 'client'
+        }, cache_status  # Fallback to default values
+

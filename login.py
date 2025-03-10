@@ -8,6 +8,8 @@ from common import decode_redis_values, DEFAULT_DAILY_LIMIT, DEFAULT_HOURLY_LIMI
 from credits import create_tokens
 from cache import get_user_data, get_redis_client
 import redis
+import json
+
 
 def user_exists(username):
     try:
@@ -43,7 +45,11 @@ def login_function(secret, access_expires, refresh_expires):
 
         # Fetch user data from Redis hash
         user_data = redis_client.hgetall(user_data_key)
-        app_logger.debug(f"Fetched user data for {username}: {user_data}")
+        # Decode byte keys and values to strings
+        decoded_user_data = {k.decode(): v.decode() for k, v in user_data.items()}
+
+        # Pretty-print the decoded JSON
+        app_logger.debug(f"Fetched user data for {username}: \n{json.dumps(decoded_user_data, indent=4, sort_keys=True)}")
 
         # Decode all byte string values to proper types
         user_data = decode_redis_values(user_data)
@@ -128,10 +134,8 @@ def login_function(secret, access_expires, refresh_expires):
             "refresh_token": refresh_token
         }
 
-        # Log the response data
-        app_logger.debug(f"Login success for user {username}: {response_data}")
-
-        return jsonify(response_data), 200
+        # Log the response data in a pretty format
+        app_logger.debug(f"Login success for user {username}:\n{json.dumps(response_data, indent=4)}")        return jsonify(response_data), 200
 
     except redis.RedisError as e:
         app_logger.error(f"Redis error during login: {str(e)}")
@@ -140,4 +144,3 @@ def login_function(secret, access_expires, refresh_expires):
         app_logger.error(f"Error during login: {str(e)}")
         app_logger.error(traceback.format_exc())
         return jsonify({"error": "Internal Server Error"}), 500
-

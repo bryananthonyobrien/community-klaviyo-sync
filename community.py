@@ -192,57 +192,6 @@ def add_member_to_sub_community(tag, community_client_id, community_api_token, u
         return False
 
 
-def add_member_to_sub_community_old(tag, community_client_id, community_api_token, username, phone_number, mode, test_mode=False):
-    """
-    Adds a member to a sub-community by tagging them.
-
-    If test mode is enabled, the API call is skipped but the logic is executed as normal.
-
-    Args:
-        username (str): The username associated with the request.
-        phone_number (str): The phone number of the member to be tagged.
-        test_mode (bool): If True, skips API calls but performs all other operations as normal.
-
-    Returns:
-        bool: True if the operation succeeded, False otherwise.
-    """
-
-    # Prepare the API URL and headers for subscription tag modification
-    tag_api_url = f"https://api.community.com/webhooks/v1/community/{community_client_id}/subscription_tag_modify"
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f"Bearer {community_api_token}"
-    }
-
-    # Prepare the payload for tagging the member
-    tag_payload = {
-        "communication_channel": "sms",
-        "operation": "add",
-        "tag": tag,
-        "phone_number": phone_number
-    }
-
-    if mode == 'single':
-        app_logger.info(f"Tagging payload: [test mode: {test_mode}] {tag_payload}")
-
-    if test_mode:
-        if mode == 'single':
-            app_logger.info("Simulate success in test mode")
-        return True  # Simulate success in test mode
-
-    try:
-        response = requests.post(tag_api_url, headers=headers, json=tag_payload)
-        if response.status_code == 202:
-            if mode == 'single':
-                app_logger.info(f"Successfully tagged member {phone_number} with tag '{tag}' for user {username}.")
-            return True
-        else:
-            app_logger.info(f"Failed to tag member: HTTP {response.status_code}, Response: {response.text}")
-            return False
-    except requests.exceptions.RequestException as e:
-        app_logger.info(f"Error during tagging: {str(e)}")
-        return False
-
 def create_sub_community_tag(username, test_mode=False):
     """
     Creates a new tag for a sub-community.

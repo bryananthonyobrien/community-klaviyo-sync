@@ -161,8 +161,8 @@ async function handleCheckout() {
     const creditsInput = document.getElementById("credits-input");
     const credits = parseInt(creditsInput.value);
 
-    if (isNaN(credits) || credits < 10000) {
-        alert("Minimum number of credits is 10000");
+    if (isNaN(credits) || credits < 1000) {
+        alert("Minimum number of credits is 1000");
         return;
     }
 

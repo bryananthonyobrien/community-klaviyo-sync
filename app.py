@@ -35,12 +35,12 @@ import sys  # Ensure this is imported
 
 # Import custom modules
 from cache import get_user_data, clash_members_and_profiles, create_stage_csv_files
-app_logger.debug("Importing credits module in app.py")
+app_logger.info("Importing credits module in app.py")
 from credits import create_tokens, cancel_payment_function, payment_success_function, create_checkout_session_function, stripe_webhook_function
-app_logger.debug("Imported credits module successfully in app.py")
-app_logger.debug("Importing common module in app.py")
+app_logger.info("Imported credits module successfully in app.py")
+app_logger.info("Importing common module in app.py")
 from common import is_token_revoked, add_issued_token_function, revoke_all_access_tokens_for_user, decode_jwt, add_revoked_token_function, DEFAULT_DAILY_LIMIT, DEFAULT_HOURLY_LIMIT, DEFAULT_MINUTE_LIMIT
-app_logger.debug("Imported common module successfully in app.py")
+app_logger.info("Imported common module successfully in app.py")
 from login import login_function
 from logout import logout_function
 from monitoring import test_throughput_function, cpu_usage_function, get_cpu_usage_function, get_file_storage_usage_function
@@ -138,7 +138,7 @@ clients_lock = threading.Lock()
 
 # Fetch user-specific rate limits from Redis
 def fetch_rate_limit_from_redis(user_id):
-    app_logger.debug(f"Fetching rate limits from Redis for user {user_id}")
+    app_logger.info(f"Fetching rate limits from Redis for user {user_id}")
 
     # Connect to Redis
     redis_client = Redis(
@@ -157,11 +157,11 @@ def fetch_rate_limit_from_redis(user_id):
     if limits:
         # Decode byte values to strings and convert them to integers
         limits = {key.decode('utf-8'): int(value) for key, value in limits.items()}
-        app_logger.debug(f"Fetched rate limits for user {user_id}: {limits}")
+        app_logger.info(f"Fetched rate limits for user {user_id}: {limits}")
         return limits
 
     # If no limits are found, return None
-    app_logger.debug(f"No rate limits found for user {user_id}")
+    app_logger.info(f"No rate limits found for user {user_id}")
     return None
     
 # Dynamically determine rate limits
@@ -217,7 +217,7 @@ def get_jti_and_username(jti):
         return None, None
 
     except Exception as e:
-        app_logger.error(f"Error getting jti and username from Redis: {str(e)}")
+        app_logger.info(f"Error getting jti and username from Redis: {str(e)}")
         return None, None
         
 def login_required(f):
@@ -227,6 +227,58 @@ def login_required(f):
             return redirect(url_for('index'))
         return f(*args, **kwargs)
     return decorated_function
+
+
+from flask import g, request
+from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
+from logs import app_logger
+from cache import get_redis_client
+
+@app.before_request
+def log_request_start():
+    """Logs requests, skipping JWT extraction for specific routes where it's never present."""
+    try:
+        redis_client = get_redis_client()
+        request_path = request.path
+
+        # Skip JWT extraction for these routes
+        if request_path in ["/", "/login"] or request_path.startswith("/static/"):
+            app_logger.info(f"📄 Serving request without JWT: {request_path}")
+            g.username = None  # Ensure username is explicitly set to None
+            return  
+
+        # Extract username from JWT for other routes
+        username = get_jwt_identity()
+        user_credits = redis_client.hget(username, "credits")
+        user_credits = int(user_credits) if user_credits else 0
+
+        # Store for later use in after_request
+        g.initial_credits = user_credits
+        g.username = username  
+
+        app_logger.info(f"🚀 Start of request {request_path} | User: {username} | Credits: {user_credits}")
+
+    except Exception as e:
+        app_logger.warning(f"⚠️ Request to {request_path} failed username extraction, proceeding without username: {str(e)}")
+        g.username = None  # Ensure username is set to None if extraction fails
+        
+@app.after_request
+def log_request_end(response):
+    """Logs request completion and credit state, even for static files."""
+    request_path = request.path
+    username = getattr(g, 'username', None)
+
+    if username:
+        redis_client = get_redis_client()
+        user_credits = redis_client.hget(username, "credits")
+        user_credits = int(user_credits) if user_credits else 0
+        initial_credits = getattr(g, 'initial_credits', 'Unknown')
+
+        app_logger.info(f"🏁 End of request {request_path} | User: {username} | Initial Credits: {initial_credits} | Final Credits: {user_credits}")
+    else:
+        app_logger.info(f"🏁 End of request {request_path}")
+
+    return response
 
 @app.route('/')
 def index():
@@ -323,7 +375,7 @@ def signal_gateway_timeout():
         return jsonify({'success': True, 'msg': 'Status updated to 504 (Gateway Time-out)'}), 200
 
     except Exception as e:
-        app_logger.error(f"Failed to set status to 504 (Gateway Time-out): {str(e)}")
+        app_logger.info(f"Failed to set status to 504 (Gateway Time-out): {str(e)}")
         return jsonify({'success': False, 'msg': 'Failed to update status', 'error_details': str(e)}), 500
 
 @app.route('/import_all_profiles', methods=['POST'])
@@ -349,7 +401,7 @@ def preopt_into_community_all():
         status_data = json.loads(status_data)
         app_logger.info(f"status_data on entry to import_all_profiles:\n{json.dumps(status_data, indent=4)}")
     except json.JSONDecodeError as e:
-        app_logger.error(f"Failed to parse JSON data from Redis: {str(e)}")
+        app_logger.info(f"Failed to parse JSON data from Redis: {str(e)}")
 
     # Extract status details from Redis data
     status = status_data.get('status')
@@ -382,7 +434,7 @@ def preopt_into_community_all():
             pretty_status_data = json.dumps(status_data, indent=4)  # Pretty format the JSON data
             app_logger.info(f"status_data reset to initial in import_all_profiles:\n{pretty_status_data}")
         except Exception as e:
-            app_logger.error(f"Failed to reset to initial status in Redis: {e}")
+            app_logger.info(f"Failed to reset to initial status in Redis: {e}")
 
     processed_profiles = int(status_data.get('processed_profiles', 0))
     total_profiles = int(status_data.get('total_profiles', 0))
@@ -461,7 +513,7 @@ def preopt_into_community_all():
     else:
         community_client_id = os.getenv('COMMUNITY_CLIENT_ID')
         if not community_client_id:
-            app_logger.error("COMMUNITY_CLIENT_ID not set in Redis or environment variables.")
+            app_logger.info("COMMUNITY_CLIENT_ID not set in Redis or environment variables.")
             return jsonify({'success': False, 'msg': 'COMMUNITY_CLIENT_ID not found'}), 500
 
     if community_api_token:
@@ -470,7 +522,7 @@ def preopt_into_community_all():
     else:
         community_api_token = os.getenv('COMMUNITY_API_TOKEN')
         if not community_api_token:
-            app_logger.error("COMMUNITY_API_TOKEN not set in Redis or environment variables.")
+            app_logger.info("COMMUNITY_API_TOKEN not set in Redis or environment variables.")
             return jsonify({'success': False, 'msg': 'COMMUNITY_API_TOKEN not found'}), 500
 
     mode = 'all'
@@ -539,8 +591,8 @@ def preopt_into_community_all():
                     app_logger.info(f"Redis status update in loop:\n{json.dumps(status_data, indent=4)}")
 
             except Exception as e:
-                app_logger.error(f"Error processing profile {profile}: {str(e)}")
-                app_logger.error(traceback.format_exc())
+                app_logger.info(f"Error processing profile {profile}: {str(e)}")
+                app_logger.info(traceback.format_exc())
 
     # Append data to CSV after each chunk
     os.makedirs(user_data_dir, exist_ok=True)
@@ -559,7 +611,7 @@ def preopt_into_community_all():
                 })
         app_logger.info(f"Data appended to CSV file {csv_filename} with {len(local_payload_structure)} entries.")
     except Exception as e:
-        app_logger.error(f"Failed to write to CSV file: {str(e)}")
+        app_logger.info(f"Failed to write to CSV file: {str(e)}")
         redis_client.set(redis_status_key, json.dumps({'status': 'failed', 'error': str(e)}))
         return jsonify({'success': False, 'msg': 'Failed to write to CSV'}), 500
 
@@ -622,7 +674,7 @@ def preopt_into_community_all():
         else:
             app_logger.warning("No 'import_started_at' found in status_data; unable to store in hash.")
     except Exception as e:
-        app_logger.error(f"Failed to add status data to Redis hash: {e}")
+        app_logger.info(f"Failed to add status data to Redis hash: {e}")
 
 
     # Prepare and return the response
@@ -746,7 +798,7 @@ def get_sms_profiles():
             json_response = json.dumps(response_data)  # Serialize the response
             json_size = sys.getsizeof(json_response)  # Get the size in bytes
         except TypeError as te:
-            app_logger.error(f"Serialization error: {str(te)}")
+            app_logger.info(f"Serialization error: {str(te)}")
             return jsonify({'success': False, 'msg': 'Internal Server Error'}), 500
 
         # Include the size of the JSON response in the response data
@@ -756,10 +808,10 @@ def get_sms_profiles():
         return jsonify(response_data), 200
 
     except redis.exceptions.ConnectionError as e:
-        app_logger.error(f"Redis connection error in get_sms_profiles: {str(e)}")
+        app_logger.info(f"Redis connection error in get_sms_profiles: {str(e)}")
         return jsonify({'success': False, 'msg': 'Redis connection error.'}), 500
     except Exception as e:
-        app_logger.error(f"Error fetching SMS profiles for user {username}: {str(e)}")
+        app_logger.info(f"Error fetching SMS profiles for user {username}: {str(e)}")
         return jsonify({'success': False, 'msg': 'Internal Server Error'}), 500
 
 @app.route('/admin')
@@ -777,7 +829,7 @@ def client_panel():
 def login():
     app_logger.info(f"Incoming request method: {request.method}")
     if request.method != 'POST':
-        app_logger.error(f"Method not allowed: {request.method}")
+        app_logger.info(f"Method not allowed: {request.method}")
         return jsonify({"error": "Method not allowed"}), 405
     app_logger.info(f"login: JWT_SECRET_KEY set: {app.config['JWT_SECRET_KEY']}")
     return login_function(app.config['JWT_SECRET_KEY'], app.config['JWT_ACCESS_TOKEN_EXPIRES'], app.config['JWT_REFRESH_TOKEN_EXPIRES'])
@@ -792,27 +844,37 @@ import stripe
 
 @app.route('/webhook', methods=['POST'])
 def stripe_webhook():
-    app_logger.info("Stripe Webhook received an event")
+    app_logger.info("🔥 Stripe Webhook received an event")
 
     payload = request.get_data(as_text=True)
     sig_header = request.headers.get('Stripe-Signature')
+    endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
 
-     # app_logger.info(f"Here is its : {payload}")
-     # app_logger.info(f"🔑 Stripe Signature Header: {sig_header}")
+    # Skip signature verification in development mode
+    if os.getenv("FLASK_ENV") == "development":
+        try:
+            event = stripe.Webhook.construct_event(
+                payload, sig_header, endpoint_secret
+            )
+        except stripe.error.SignatureVerificationError:
+            app_logger.warning("⚠️ Signature verification failed, but skipping in dev mode.")
+            event = {"type": "test.event"}  # Mock event for local testing
+    else:
+        try:
+            event = stripe.Webhook.construct_event(
+                payload, sig_header, endpoint_secret
+            )
+        except stripe.error.SignatureVerificationError as e:
+            app_logger.info(f"❌ Webhook signature verification failed: {str(e)}")
+            return jsonify({"error": "Webhook signature verification failed"}), 400
+        except Exception as e:
+            app_logger.info(f"❌ Webhook processing failed: {str(e)}")
+            return jsonify({"error": "Webhook processing failed"}), 400
 
-    try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, os.getenv("STRIPE_WEBHOOK_SECRET")
-        )
-        app_logger.info(f"It's an {event['type']} event")
-    except stripe.error.SignatureVerificationError as e:
-        app_logger.error(f"❌ Webhook signature verification failed: {str(e)}")
-        return jsonify({"error": "Webhook signature verification failed"}), 400
-    except Exception as e:
-        app_logger.error(f"❌ Webhook processing failed: {str(e)}")
-        return jsonify({"error": "Webhook processing failed"}), 400
-
-    return stripe_webhook_function(event)  # Pass the event object to the handler
+    app_logger.info(f"✅ Successfully received event: {event['type']}")
+    
+    # Pass the event object to the handler
+    return stripe_webhook_function(event)
 
 import csv
 
@@ -908,7 +970,7 @@ def get_members_data():
             }), 200
 
         except Exception as e:
-            app_logger.error(f"Error loading file for user {username}: {str(e)}")
+            app_logger.info(f"Error loading file for user {username}: {str(e)}")
             return jsonify({'msg': 'Internal Server Error'}), 500
     else:
         # If no files match the pattern, return 'N/A' for each metric
@@ -1015,7 +1077,7 @@ def get_members_data_from_file_remove():
         }), 200
 
     except Exception as e:
-        app_logger.error(f"Error loading file for user {username}: {str(e)}")
+        app_logger.info(f"Error loading file for user {username}: {str(e)}")
         return jsonify({'msg': 'Internal Server Error'}), 500
 
 @app.route('/upload_community_communities_file', methods=['POST'])
@@ -1085,7 +1147,7 @@ def upload_community_communities_file():
             redis_client.hset(redis_key, "file_name", file.filename)
             communities_loaded_in_redis = True
         except Exception as redis_error:
-            app_logger.error(f"Error storing data in Redis for {username}: {str(redis_error)}")
+            app_logger.info(f"Error storing data in Redis for {username}: {str(redis_error)}")
             communities_loaded_in_redis = False
 
         # Log the total count
@@ -1102,7 +1164,7 @@ def upload_community_communities_file():
 
         return jsonify(response_payload), 200
     except Exception as e:
-        app_logger.error(f"Error saving file by {username}: {str(e)}")
+        app_logger.info(f"Error saving file by {username}: {str(e)}")
         return jsonify({'msg': 'Internal Server Error'}), 500  # General message for security
 
 
@@ -1202,7 +1264,7 @@ def upload_community_members_file():
             redis_client.hset(redis_key, "file_name", file.filename)
             members_loaded_in_redis = True
         except Exception as redis_error:
-            app_logger.error(f"Error storing data in Redis for {username}: {str(redis_error)}")
+            app_logger.info(f"Error storing data in Redis for {username}: {str(redis_error)}")
             members_loaded_in_redis = False
 
         # Log the counts
@@ -1225,7 +1287,7 @@ def upload_community_members_file():
 
         return jsonify(response_payload), 200
     except Exception as e:
-        app_logger.error(f"Error saving file by {username}: {str(e)}")
+        app_logger.info(f"Error saving file by {username}: {str(e)}")
         return jsonify({'msg': 'Internal Server Error'}), 500  # General message for security
 
 @app.route('/upload_memberships_file', methods=['POST'])
@@ -1254,7 +1316,7 @@ def upload_memberships_file():
         file_path = os.path.join(directory_path, file.filename)
         file.save(file_path)
     except Exception as e:
-        app_logger.error(f"file failure: {e}")
+        app_logger.info(f"file failure: {e}")
         return jsonify({'msg': 'Error saving file'}), 500
 
     membership_data = defaultdict(lambda: {
@@ -1328,7 +1390,7 @@ def upload_memberships_file():
 
         return jsonify(response_payload), 200
     except Exception as e:
-        app_logger.error(f"Error processing memberships file: {str(e)}")
+        app_logger.info(f"Error processing memberships file: {str(e)}")
         return jsonify({'msg': 'Error processing file'}), 500
 
 @app.route('/get_community_data', methods=['GET'])
@@ -1426,7 +1488,7 @@ def get_community_data():
         return jsonify(response_payload), 200
 
     except Exception as e:
-        app_logger.error(f"Error fetching {data_type} data for {username}: {str(e)}")
+        app_logger.info(f"Error fetching {data_type} data for {username}: {str(e)}")
         return jsonify({'msg': f'Failed to retrieve {data_type} data'}), 500
 
 @app.route('/unload_community_data', methods=['POST'])
@@ -1457,7 +1519,7 @@ def unload_community_data():
         # Return a success message
         return jsonify({'msg': f'{data} data unloaded successfully!'}), 200
     except Exception as e:
-        app_logger.error(f"Error unloading Redis data for {username} and data type: {data}: {str(e)}")
+        app_logger.info(f"Error unloading Redis data for {username} and data type: {data}: {str(e)}")
         return jsonify({'msg': f'Failed to unload {data} data'}), 500  # General error message
 
 @measure_time
@@ -1492,7 +1554,7 @@ def redis_status():
 
     except Exception as e:
         # Log the error
-        app_logger.error("Error connecting to Redis: %s", str(e))
+        app_logger.info("Error connecting to Redis: %s", str(e))
         return jsonify({'status': 'BAD', 'error': str(e)}), 500
 
 
@@ -1664,38 +1726,7 @@ def get_events(client_id):
         return jsonify(response_data), 200
 
     except Exception as e:
-        app_logger.error(f"Error in get_events: {str(e)}")
-        return jsonify({"error": "Failed to retrieve events"}), 500
-
-@app.route('/get_events_old/<client_id>', methods=['GET'])
-def get_events_old(client_id):
-    try:
-        # Retrieve events for the specified client_id
-        redis_client = get_redis_client()
-        redis_key = f"community_member_events_{client_id}"
-        data = redis_client.lrange(redis_key, 0, -1)  # Fetch all entries in the list
-
-        # Get the number of events
-        num_events = len(data)
-
-        # Estimate memory usage (if MEMORY USAGE is supported)
-        memory_usage = redis_client.memory_usage(redis_key) or 0
-
-        # Log details
-        app_logger.info(f"get_events: {client_id} - Number of events: {num_events}, Memory used: {memory_usage} bytes")
-
-        # Convert to JSON
-        events = [json.loads(event) for event in data]
-
-        # Return JSON response including metrics
-        return jsonify({
-            "client_id": client_id,
-            "events": events,
-            "num_events": num_events,
-            "memory_usage_bytes": memory_usage
-        }), 200
-    except Exception as e:
-        app_logger.error(f"Error in get_events: {str(e)}")
+        app_logger.info(f"Error in get_events: {str(e)}")
         return jsonify({"error": "Failed to retrieve events"}), 500
 
 @app.route('/load_events_from_file/<client_id>', methods=['POST'])
@@ -1763,7 +1794,7 @@ def load_events_from_file(client_id):
                         app_logger.info(f"Processed {processed_lines} lines. Added: {added_records}, Skipped: {skipped_records}")
 
                 except json.JSONDecodeError as e:
-                    app_logger.error(f"Error decoding JSON line: {line}. Error: {str(e)}")
+                    app_logger.info(f"Error decoding JSON line: {line}. Error: {str(e)}")
                     continue
 
             # Process any remaining events in the batch
@@ -1787,7 +1818,7 @@ def load_events_from_file(client_id):
         }), 200
 
     except Exception as e:
-        app_logger.error(f"Error loading events from file for client_id {client_id}: {str(e)}")
+        app_logger.info(f"Error loading events from file for client_id {client_id}: {str(e)}")
         return jsonify({"error": "Failed to process the file"}), 500
 
 @app.route('/load_all_events_from_files/<client_id>', methods=['POST'])
@@ -1867,7 +1898,7 @@ def load_all_events_from_files(client_id):
                             app_logger.info(f"Processed {processed_lines} lines for {event_type}. Added: {added_records}, Skipped: {skipped_records}")
 
                     except json.JSONDecodeError as e:
-                        app_logger.error(f"Error decoding JSON line: {line}. Error: {str(e)}")
+                        app_logger.info(f"Error decoding JSON line: {line}. Error: {str(e)}")
                         continue
 
                 # Process any remaining events in the batch
@@ -1902,7 +1933,7 @@ def load_all_events_from_files(client_id):
         return jsonify(response_data), 200
 
     except Exception as e:
-        app_logger.error(f"Error loading events from files for client_id {client_id}: {str(e)}")
+        app_logger.info(f"Error loading events from files for client_id {client_id}: {str(e)}")
         return jsonify({"error": "Failed to process the files"}), 500
 
 @app.route('/clear_events/<client_id>', methods=['DELETE'])
@@ -1939,7 +1970,7 @@ def clear_events(client_id):
             app_logger.info(f"No events found to clear for client_id: {client_id}")
             return jsonify({"message": "No events found to clear"}), 200
     except Exception as e:
-        app_logger.error(f"Error in clear_events: {str(e)}")
+        app_logger.info(f"Error in clear_events: {str(e)}")
         return jsonify({"error": "Failed to clear events"}), 500
 
 @app.route('/delete_klaviyo_discovery', methods=['DELETE'])
@@ -2066,7 +2097,7 @@ def import_status():
         return jsonify(response), 200
 
     except Exception as e:
-        app_logger.error(f"Error fetching import status for user {username}: {str(e)}")
+        app_logger.info(f"Error fetching import status for user {username}: {str(e)}")
         return jsonify({"error": "Failed to retrieve import status"}), 500
 
 
@@ -2126,7 +2157,7 @@ def klaviyo_status():
         return jsonify(response), 200
 
     except Exception as e:
-        app_logger.error(f"Error fetching Klaviyo status for user {username}: {str(e)}")
+        app_logger.info(f"Error fetching Klaviyo status for user {username}: {str(e)}")
         return jsonify({"error": "Failed to retrieve Klaviyo status"}), 500
 
 @app.route('/set_stripe_publishable_key', methods=['POST'])
@@ -2150,7 +2181,7 @@ def set_stripe_publishable_key():
         return jsonify({"message": "Stripe Publishable Key updated successfully"}), 200
 
     except Exception as e:
-        app_logger.error(f"Error setting Stripe Publishable Key for user {username}: {str(e)}")
+        app_logger.info(f"Error setting Stripe Publishable Key for user {username}: {str(e)}")
         return jsonify({"error": "Failed to update Stripe Publishable Key"}), 500
 
 @app.route('/set_klaviyo_read_profile_api_key', methods=['POST'])
@@ -2174,7 +2205,7 @@ def set_klaviyo_read_profile_api_key():
         return jsonify({"message": "Klaviyo API key updated successfully"}), 200
 
     except Exception as e:
-        app_logger.error(f"Error setting Klaviyo API key for user {username}: {str(e)}")
+        app_logger.info(f"Error setting Klaviyo API key for user {username}: {str(e)}")
         return jsonify({"error": "Failed to update Klaviyo API key"}), 500
 
 @app.route('/set_sub_community', methods=['POST'])
@@ -2204,7 +2235,7 @@ def set_sub_community():
         return jsonify({"message": "Sub Community updated and tag created successfully"}), 200
 
     except Exception as e:
-        app_logger.error(f"Error setting Sub Community for user {username}: {str(e)}")
+        app_logger.info(f"Error setting Sub Community for user {username}: {str(e)}")
         return jsonify({"error": "Failed to update Sub Community"}), 500
 
 @app.route('/set_community_client_id', methods=['POST'])
@@ -2228,7 +2259,7 @@ def set_community_client_id():
         return jsonify({"message": "Community Client ID updated successfully"}), 200
 
     except Exception as e:
-        app_logger.error(f"Error setting Community Client ID for user {username}: {str(e)}")
+        app_logger.info(f"Error setting Community Client ID for user {username}: {str(e)}")
         return jsonify({"error": "Failed to update Community Client ID"}), 500
 
 @app.route('/set_community_api_token', methods=['POST'])
@@ -2252,7 +2283,7 @@ def set_community_api_token():
         return jsonify({"message": "Community API token updated successfully"}), 200
 
     except Exception as e:
-        app_logger.error(f"Error setting Community API token for user {username}: {str(e)}")
+        app_logger.info(f"Error setting Community API token for user {username}: {str(e)}")
         return jsonify({"error": "Failed to update Community API token"}), 500
 
 @app.route('/set_max_workers', methods=['POST'])
@@ -2285,7 +2316,7 @@ def set_max_community_workers():
         return jsonify({"message": "Max workers updated successfully", "max_workers": max_workers}), 200
 
     except Exception as e:
-        app_logger.error(f"Error setting max community workers for user {username}: {str(e)}")
+        app_logger.info(f"Error setting max community workers for user {username}: {str(e)}")
         return jsonify({"error": "Failed to update max workers"}), 500
 
 @app.route('/set_test_mode', methods=['POST'])
@@ -2316,7 +2347,7 @@ def set_test_mode():
         return jsonify({"message": "Test mode updated successfully", "test_mode": test_mode_enabled}), 200
 
     except Exception as e:
-        app_logger.error(f"Error setting test mode for user {username}: {str(e)}")
+        app_logger.info(f"Error setting test mode for user {username}: {str(e)}")
         return jsonify({"error": "Failed to update test mode"}), 500
 
 @app.route('/get_configuration', methods=['GET'])
@@ -2354,7 +2385,7 @@ def get_configuration():
         }), 200
 
     except Exception as e:
-        app_logger.error(f"❌ Error fetching configuration for user {username}: {str(e)}")
+        app_logger.info(f"❌ Error fetching configuration for user {username}: {str(e)}")
         return jsonify({"error": "Failed to retrieve configuration"}), 500
 
 
@@ -2429,7 +2460,7 @@ def create_community_list():
             return handle_error_response(new_list_response)
 
     except Exception as e:
-        app_logger.error(f"Error creating community list for {username}: {str(e)}")
+        app_logger.info(f"Error creating community list for {username}: {str(e)}")
         return jsonify({'success': False, 'msg': 'Internal Server Error'}), 500
 
 
@@ -2483,14 +2514,14 @@ def find_existing_list(api_key, community_name):
                 else:
                     break  # No 'next' link, end of pagination
             else:
-                app_logger.error(f"Failed to check existing lists: {response.text}")
+                app_logger.info(f"Failed to check existing lists: {response.text}")
                 return None
 
         # If no matching list was found after all pages
         app_logger.info(f"No matching list found for {community_name}.")
         return None
     except Exception as e:
-        app_logger.error(f"Error in find_existing_list: {str(e)}")
+        app_logger.info(f"Error in find_existing_list: {str(e)}")
         return None
 
 
@@ -2519,7 +2550,7 @@ def create_klaviyo_list(api_key, community_name):
 def handle_error_response(response):
     error_message = response.json().get('errors', [{'detail': 'Unknown error'}])[0].get('detail', 'Unknown error') \
         if response.headers.get("Content-Type") in ["application/json", "application/vnd.api+json"] else response.text
-    app_logger.error(f"Failed to create community list: {error_message}")
+    app_logger.info(f"Failed to create community list: {error_message}")
     return jsonify({'success': False, 'msg': error_message}), response.status_code
 
 def set_field_with_precedence(properties, location, field_name):
@@ -2555,33 +2586,6 @@ def is_likely_to_be_a_phone_number(phone_number):
     # Check if the remaining string has at least 10 digits but no more than 14 digits
     return phone_number.isdigit() and 10 <= len(phone_number) <= 14
 
-def do_ip_address_look_up_old(ip):
-    try:
-        # Make the request to ipinfo.io
-        ipinfo_url = f"http://ipinfo.io/{ip}?token=c3a12271a0687f"
-        response = requests.get(ipinfo_url)
-
-        # If the request is successful, extract and return country and postal
-        if response.status_code == 200:
-            ip_data = response.json()  # Convert the response to JSON
-
-            # Log the full IP data in pretty format
-            # app_logger.info(f"IPinfo Response for IP {ip}:\n{json.dumps(ip_data, indent=4)}")
-
-            # Extract country and postal from the response
-            country = ip_data.get("country")
-            postal = ip_data.get("postal")
-
-            # Return country and postal as a dictionary
-            return {"country": country, "postal": postal}
-        else:
-            app_logger.error(f"Error fetching IP info for {ip}: {response.status_code}")
-            return None  # Return None if the request fails
-
-    except Exception as e:
-        app_logger.error(f"Error occurred while fetching IP info for {ip}: {str(e)}")
-        return None  # Return None if an exception occurs
-
 @app.route('/load_profiles', methods=['POST'])
 @jwt_required()
 def load_profiles():
@@ -2607,7 +2611,7 @@ def load_profiles():
 
     # Validate that the directory is a string and exists
     if not isinstance(directory, str) or not os.path.exists(directory):
-        app_logger.error(f"Invalid directory provided by user {username}: {directory}")
+        app_logger.info(f"Invalid directory provided by user {username}: {directory}")
         return jsonify({"msg": "Valid directory is required"}), 400
 
     app_logger.info(f"/load_profiles called for {username} with directory: {directory}")
@@ -2689,7 +2693,7 @@ def load_profiles():
                                     app_logger.info(f"On iteration {n_iterations} - Invalid birthday format for profile: {profile_data['email']}, original: {birthday_str}")
                                     profile_data["birthday"] = ""
                             except Exception as e:
-                                app_logger.error(f"Unexpected error parsing birthday for profile {profile_data['email']}: {e}")
+                                app_logger.info(f"Unexpected error parsing birthday for profile {profile_data['email']}: {e}")
                                 profile_data["birthday"] = ""
                         else:
                             profile_data["birthday"] = ""  # Set to empty if no birthday provided
@@ -2841,7 +2845,7 @@ def load_profiles():
             for profile in profiles_data.values():
                 writer.writerow(profile)
 
-        app_logger.debug(f"CSV file created successfully at {csv_file_path}")
+        app_logger.info(f"CSV file created successfully at {csv_file_path}")
 
         # Prepare response with counts and CSV file path
         response_data = {
@@ -2868,13 +2872,13 @@ def load_profiles():
         }
 
         pretty_status_data = json.dumps(response_data, indent=4)
-        app_logger.debug(f"/load_profiles : Response Data:\n{pretty_status_data}")
+        app_logger.info(f"/load_profiles : Response Data:\n{pretty_status_data}")
 
 
         return jsonify(response_data), 200
 
     except Exception as e:
-        app_logger.error(f"Error loading profiles: {str(e)}")
+        app_logger.info(f"Error loading profiles: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/load_failed_profiles', methods=['GET'])
@@ -2917,7 +2921,7 @@ def load_failed_profiles():
         }), 200
 
     except Exception as e:
-        app_logger.error(f"Error processing CSV file for user {username}: {str(e)}")
+        app_logger.info(f"Error processing CSV file for user {username}: {str(e)}")
         return jsonify({"error": "Internal Server Error", "details": str(e)}), 500
 
 @app.route('/load_passed_profiles', methods=['GET'])
@@ -2960,9 +2964,8 @@ def load_passed_profiles():
         }), 200
 
     except Exception as e:
-        app_logger.error(f"Error processing CSV file for user {username}: {str(e)}")
+        app_logger.info(f"Error processing CSV file for user {username}: {str(e)}")
         return jsonify({"error": "Internal Server Error", "details": str(e)}), 500
-
 
 @app.route('/download_csv', methods=['GET'])
 @jwt_required()
@@ -3024,13 +3027,12 @@ def preopt_into_community():
             return jsonify(response_data), 200
         else:
             error_message = result.get("message", "Unknown error") if result else "Failed to create subscription"
-            app_logger.error(f"Failed to process subscription: {error_message}")
+            app_logger.info(f"Failed to process subscription: {error_message}")
             return jsonify({'success': False, 'msg': error_message}), 400
 
     except Exception as e:
-        app_logger.error(f"Error processing pre-opt into community for {username}: {str(e)}")
+        app_logger.info(f"Error processing pre-opt into community for {username}: {str(e)}")
         return jsonify({'success': False, 'msg': 'Internal Server Error'}), 500
-
 
 def do_preopt_into_community(redis_client, data, username, test_mode_enabled=False):
 
@@ -3049,7 +3051,7 @@ def do_preopt_into_community(redis_client, data, username, test_mode_enabled=Fal
     else:
         community_client_id = os.getenv('COMMUNITY_CLIENT_ID')
         if not community_client_id:
-            app_logger.error("COMMUNITY_CLIENT_ID not set in Redis or environment variables.")
+            app_logger.info("COMMUNITY_CLIENT_ID not set in Redis or environment variables.")
             return {'status': 'error', 'message': 'COMMUNITY_CLIENT_ID not found.'}
 
     if community_api_token:
@@ -3058,7 +3060,7 @@ def do_preopt_into_community(redis_client, data, username, test_mode_enabled=Fal
     else:
         community_api_token = os.getenv('COMMUNITY_API_TOKEN')
         if not community_api_token:
-            app_logger.error("COMMUNITY_API_TOKEN not set in Redis or environment variables.")
+            app_logger.info("COMMUNITY_API_TOKEN not set in Redis or environment variables.")
             return {'status': 'error', 'message': 'COMMUNITY_API_TOKEN not found.'}
 
 
@@ -3075,12 +3077,12 @@ def do_preopt_into_community(redis_client, data, username, test_mode_enabled=Fal
         if result is not None:
             app_logger.info(f"Subscription created successfully: {result}")
         else:
-            app_logger.error("Failed to create subscription.")
+            app_logger.info("Failed to create subscription.")
 
         return result
 
     except Exception as e:
-        app_logger.error(f"Exception in do_preopt_into_community: {str(e)}")
+        app_logger.info(f"Exception in do_preopt_into_community: {str(e)}")
         return {'status': 'error', 'message': 'An error occurred while processing pre-opt.'}
 
 @app.route('/get_chunk_data', methods=['POST'])
@@ -3128,7 +3130,6 @@ def get_chunk_data():
         app_logger.info(f"Error retrieving chunk data for {chunk_key}: {str(e)}")
         return jsonify({"error": "Failed to retrieve chunk data"}), 500
 
-
 @app.route('/create_stage_csv_files', methods=['POST'])
 @jwt_required()
 def create_stage_csv_route():
@@ -3160,14 +3161,14 @@ def create_stage_csv_route():
         try:
             json.dumps(response_data)  # Attempt to serialize
         except TypeError as te:
-            app_logger.error(f"Serialization error: {str(te)}")
+            app_logger.info(f"Serialization error: {str(te)}")
             return jsonify({'success': False, 'msg': 'Internal Server Error'}), 500
 
         app_logger.info(f"User {username} completed CSV creation. Results: {response_data}")
         return jsonify(response_data), 200
 
     except Exception as e:
-        app_logger.error(f"Error processing CSV creation for {username}: {str(e)}")
+        app_logger.info(f"Error processing CSV creation for {username}: {str(e)}")
         return jsonify({'success': False, 'msg': 'Internal Server Error'}), 500
 
 @app.route('/clash_members_profiles_works', methods=['POST'])
@@ -3319,7 +3320,6 @@ def clash_members_profiles():
         app_logger.info(f"Error processing clash members and profiles for {username}: {str(e)}")
         return jsonify({'success': False, 'msg': 'Internal Server Error'}), 500
 
-
 @app.route('/klaviyo_discoveries', methods=['GET'])
 @jwt_required()
 def get_klaviyo_discoveries():
@@ -3354,7 +3354,7 @@ def get_klaviyo_discoveries():
 @cross_origin()
 @limiter.limit(get_dynamic_rate_limit)
 def discover_klaviyo_profiles():
-    app_logger.debug("/discover_klaviyo_profiles")
+    app_logger.info("/discover_klaviyo_profiles")
     claims = get_jwt()
 
     # Initialize response data
@@ -3371,7 +3371,7 @@ def discover_klaviyo_profiles():
 
         # Check if user is suspended
         if user_data.get('user_status') == 'suspended':
-            app_logger.error(f"Suspended user {username} attempted to initiate 'discover klaviyo'")
+            app_logger.info(f"Suspended user {username} attempted to initiate 'discover klaviyo'")
             return jsonify({"msg": "User is suspended", "user_status": "suspended"}), 403
 
         try:
@@ -3401,19 +3401,9 @@ def discover_klaviyo_profiles():
         return jsonify(response_data), status_code
 
     except Exception as e:
-        app_logger.error(f"Error in 'discover klaviyo profiles' for user {username}: {str(e)}")
-        app_logger.error(traceback.format_exc())
+        app_logger.info(f"Error in 'discover klaviyo profiles' for user {username}: {str(e)}")
+        app_logger.info(traceback.format_exc())
         return jsonify({"error": "Internal Server Error"}), 500
-
-@app.route('/persist-now', methods=['POST'])
-@jwt_required()
-def persist_now():
-    # Check if the user is an admin
-    claims = get_jwt()
-    if claims.get('role') != 'admin':
-        return jsonify({"msg": "Only admins can access this endpoint"}), 403
-
-    return jsonify({"msg": "Clients data persisted"}), 200
 
 @app.route('/cpu-usage', methods=['GET'])
 @jwt_required()
@@ -3462,17 +3452,17 @@ def handle_expired_error(e):
                 redis_client=redis_client
             )
 
-            app_logger.debug(f"Removed expired token: {jti} for user {username}")
+            app_logger.info(f"Removed expired token: {jti} for user {username}")
             return jsonify({"msg": "Token has expired and has been logged out"}), 401
         else:
             # If we don't find the JSON in "issued_tokens", it's either already revoked or never existed
             return jsonify({"msg": "Token not found in issued tokens"}), 401
 
     except redis.RedisError as re:
-        app_logger.error(f"Redis error handling expired token: {str(re)}")
+        app_logger.info(f"Redis error handling expired token: {str(re)}")
         return jsonify({"error": "Redis error. Please try again later."}), 500
     except Exception as exc:
-        app_logger.error(f"Error handling expired token: {str(exc)}")
+        app_logger.info(f"Error handling expired token: {str(exc)}")
         return jsonify({"error": "Internal Server Error"}), 500
 
 @app.route('/logout', methods=['POST'])
@@ -3503,7 +3493,7 @@ def get_user_limits():
 @jwt_required(refresh=True)
 @limiter.limit("5 per minute; 10 per day; 100 per month")
 def refresh():
-    app_logger.debug("/refresh")
+    app_logger.info("/refresh")
     try:
         current_user = get_jwt_identity()
 
@@ -3543,7 +3533,8 @@ def refresh():
                                                      app.config['JWT_REFRESH_TOKEN_EXPIRES'], check_existing_refresh=True)
 
         # Cleanup expired tokens
-        expired_tokens = redis_client.smembers('issued_tokens')  # Assuming you store issued tokens in a set
+        issued_tokens_key = f"issued_tokens:{current_user}"
+        expired_tokens = redis_client.smembers(issued_tokens_key)
         expired_tokens = [json.loads(token.decode('utf-8')) for token in expired_tokens if token_is_expired(token)]
 
         # Revoke expired tokens
@@ -3553,17 +3544,17 @@ def refresh():
 
         return jsonify(access_token=access_token), 200
     except RateLimitExceeded as e:
-        app_logger.error(f"Rate limit exceeded: {str(e)}")
+        app_logger.info(f"Rate limit exceeded: {str(e)}")
         return jsonify({"error": "Rate limit exceeded", "retry_after": e.description["retry_after"]}), 429
     except Exception as e:
-        app_logger.error(f"Error during token refresh: {str(e)}")
-        app_logger.error(traceback.format_exc())
+        app_logger.info(f"Error during token refresh: {str(e)}")
+        app_logger.info(traceback.format_exc())
         return jsonify({"error": "Internal Server Error"}), 500
         
 @app.route('/revoke', methods=['POST'])
 @jwt_required()
 def revoke():
-    app_logger.debug("/revoke")
+    app_logger.info("/revoke")
     try:
         # Ensure the request is JSON and contains a 'username'
         if not request.is_json or request.json.get('username') is None:
@@ -3576,7 +3567,7 @@ def revoke():
         if current_user_role != "admin":
             return jsonify({"msg": "Only admins can revoke tokens"}), 403
 
-        app_logger.debug(f"Revoking tokens for user: {username}")
+        app_logger.info(f"Revoking tokens for user: {username}")
 
         # Connect to Redis
         redis_client = Redis(
@@ -3590,7 +3581,7 @@ def revoke():
         issued_tokens_key = f"issued_tokens:{username}"
         tokens = redis_client.smembers(issued_tokens_key)
         if not tokens:
-            app_logger.debug(f"No tokens found for user: {username}")
+            app_logger.info(f"No tokens found for user: {username}")
             return jsonify({"msg": f"No tokens found for user {username}"}), 404
 
         # Revoke all tokens for the user
@@ -3606,73 +3597,73 @@ def revoke():
 
                 # Remove the token from the issued tokens set
                 redis_client.srem(issued_tokens_key, token)
-                app_logger.debug(f"Revoked token: {jti} for user: {username}")
+                app_logger.info(f"Revoked token: {jti} for user: {username}")
 
             except Exception as e:
-                app_logger.error(f"Error revoking token for user {username}: {str(e)}")
+                app_logger.info(f"Error revoking token for user {username}: {str(e)}")
                 continue
 
         return jsonify({"msg": f"All tokens for {username} have been revoked"}), 200
 
     except Exception as e:
-        app_logger.error(f"Error during revoke: {str(e)}")
-        app_logger.error(traceback.format_exc())
+        app_logger.info(f"Error during revoke: {str(e)}")
+        app_logger.info(traceback.format_exc())
         return jsonify({"error": "Internal Server Error"}), 500
         
 @app.route('/app', methods=['GET', 'POST'])
 @cross_origin()
 def app_route():
     if request.method == 'GET':
-        app_logger.debug("Serving API key form")
+        app_logger.info("Serving API key form")
         return render_template('api_key_form.html')
     elif request.method == 'POST':
         api_key = request.form.get('api_key')
         if (api_key == os.getenv('API_KEY')):
-            app_logger.debug("Valid API key entered, serving instructions page")
+            app_logger.info("Valid API key entered, serving instructions page")
             return render_template('instructions.html')
         else:
-            app_logger.debug("Invalid API key entered")
+            app_logger.info("Invalid API key entered")
             return jsonify({"error": "Unauthorized"}), 401
 
 def validate_and_process():
     try:
         raw_data = request.get_data(as_text=True)
-        app_logger.debug(f"Request payload: {raw_data}")
+        app_logger.info(f"Request payload: {raw_data}")
 
         if not request.is_json:
             error_message = "Request must be JSON"
-            # app_logger.error(error_message)
+            # app_logger.info(error_message)
             return jsonify({"error": error_message}), 400
 
         # data = request.get_json()
-        # app_logger.debug(f"Received data: {json.dumps(data, indent=4)}")
+        # app_logger.info(f"Received data: {json.dumps(data, indent=4)}")
 
         timestamp = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
         # log_message = f"{timestamp} - Payload received and logged\n{json.dumps(data, indent=4)}"
-        # app_logger.debug(log_message)
+        # app_logger.info(log_message)
 
         return jsonify({"result": True, "timestamp": timestamp}), 200
 
     except ExpiredSignatureError as e:
-        app_logger.error(f"Token has expired: {str(e)}")
+        app_logger.info(f"Token has expired: {str(e)}")
         return jsonify({"error": "Token has expired"}), 401  # Correct status code
 
     except RateLimitExceeded as e:
         retry_after = e.description['retry_after'] if 'retry_after' in e.description else 60  # Default to 60 seconds if not specified
-        app_logger.error(f"Rate limit exceeded: Retry after {retry_after} seconds")
+        app_logger.info(f"Rate limit exceeded: Retry after {retry_after} seconds")
         response = jsonify({"error": "Rate limit exceeded", "retry_after": retry_after})
         response.headers['Retry-After'] = retry_after
         return response, 429
 
     except Exception as e:
-        app_logger.error(f"Error processing payload: {str(e)}")
-        app_logger.error(traceback.format_exc())
+        app_logger.info(f"Error processing payload: {str(e)}")
+        app_logger.info(traceback.format_exc())
         return jsonify({"error": "Internal Server Error"}), 500
 
 @app.errorhandler(429)
 def ratelimit_error(e):
     retry_after = e.description['retry_after'] if 'retry_after' in e.description else 60  # Default to 60 seconds if not specified
-    app_logger.error(f"Rate limit exceeded: Retry after {retry_after} seconds")
+    app_logger.info(f"Rate limit exceeded: Retry after {retry_after} seconds")
     response = jsonify({"error": "Rate limit exceeded", "retry_after": retry_after})
     response.headers['Retry-After'] = retry_after
     return response, 429
@@ -3691,8 +3682,8 @@ def not_found(error):
 
 @app.errorhandler(Exception)
 def handle_exception(e):
-    app_logger.error(f"Unexpected error: {str(e)}")
-    app_logger.error(traceback.format_exc())
+    app_logger.info(f"Unexpected error: {str(e)}")
+    app_logger.info(traceback.format_exc())
     return jsonify({"error": "Internal Server Error"}), 500
 
 # Disable SSLify for local development

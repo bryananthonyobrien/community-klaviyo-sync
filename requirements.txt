@@ -17,3 +17,4 @@ unidecode
 brotli
 stripe
 flask-talisman
+pytest

@@ -7,7 +7,7 @@ from flask import jsonify, request, render_template
 from flask_jwt_extended import get_jwt_identity, create_access_token, create_refresh_token
 from logs import app_logger
 from cache import get_user_data
-
+import time
     
 app_logger.debug("Importing common module in credits.py")
 from common import add_issued_token_function, revoke_all_access_tokens_for_user, decode_jwt, add_revoked_token_function
@@ -36,7 +36,6 @@ def log_credit_change(redis_client, username, amount, source, transaction_id):
         # Ensure the key exists
         if not redis_client.exists(redis_key):
             app_logger.info(f"Redis list {redis_key} does not exist. Initializing...")
-            redis_client.rpush(redis_key, json.dumps({"init": "list created"}))
 
         # Push credit change
         redis_client.rpush(redis_key, json.dumps(credit_change))
@@ -46,6 +45,7 @@ def log_credit_change(redis_client, username, amount, source, transaction_id):
     except Exception as e:
         app_logger.error(f"❌ Error logging credit change for user {username}: {e}")
         raise
+    return
 
 def add_user_credits(username, credits):
     redis_client = get_redis_client()
@@ -60,8 +60,8 @@ def add_user_credits(username, credits):
     current_credits = int(redis_client.hget(user_data_key, "credits") or 0)
     new_credits = current_credits + credits
     redis_client.hset(user_data_key, "credits", new_credits)
-    app_logger.info(f"{username} had {current_credits} but now has {new_credits} credits")
     log_credit_change(redis_client, username, credits, 'stripe', '0')
+    app_logger.info(f"{username} had {current_credits} but now has {new_credits} credits")
 
     return "Success"
     
@@ -123,78 +123,138 @@ def create_checkout_session_function():
 
 def handle_payment_intent_succeeded(payment_intent):
     app_logger.info(f"✅ PaymentIntent was successful")
+    return
 
 def handle_checkout_session_completed(session):
-    # app_logger.info(f"✅ Checkout session completed")
-    # app_logger.info(f"{json.dumps(session, indent=4)}")
-
     metadata = session.get('metadata', {})
     username = metadata.get('username')
     credits = metadata.get('credits')
+    session_id = session.get('id')  # Ensure we use the correct Stripe session ID
 
-    if username and credits:
+    if username and credits and session_id:
+        redis_client = get_redis_client()
+        session_key = f"session:{session_id}"
+
+        # 🚨 Use SETNX (SET if Not Exists) to ensure only ONE worker processes this session
+        if not redis_client.setnx(session_key, "processed"):
+            existing_value = redis_client.get(session_key)
+            app_logger.warning(f"⚠️ Duplicate processing attempt for session_id: {session_id}, skipping. Session was processed at: {existing_value}")
+            return
+
+        # ✅ Set an expiration for cleanup after 24 hours
+        redis_client.expire(session_key, 86400)
+
         credits = int(credits)
         app_logger.info(f"✅ Checkout session completed for user: {username} ({credits} credits)")
 
         try:
-            redis_client = get_redis_client()
             if redis_client.exists(username):
                 user_data = redis_client.hgetall(username)
                 user_data = {k.decode(): v.decode() for k, v in user_data.items()}
-                app_logger.info(f"🛠️ Redis data for {username}: {user_data}")
+                app_logger.info(f"🛠️ Redis BEFORE updating credits for {username}: {user_data}")
             else:
                 app_logger.info(f"⚠️ Redis key {username} does not exist")
 
-            result = add_user_credits(username, credits)
-            if result != "Success":
-                app_logger.info(f"❌ Error updating credits for {username}: {result}")
+            # 🔄 Retry logic for Redis transaction
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    with redis_client.pipeline() as pipe:
+                        pipe.watch(username)  # Watch key to detect external modifications
+                        current_credits = int(redis_client.hget(username, "credits") or 0)
+                        new_credits = current_credits + credits
+
+                        pipe.multi()  # Start transaction
+                        pipe.hset(username, "credits", new_credits)  # Update credits
+                        pipe.execute()  # Commit transaction
+
+                        app_logger.info(f"✅ Credits updated for {username}: {current_credits} ➝ {new_credits}")
+                        break  # ✅ Success, break out of retry loop
+
+                except redis.WatchError:
+                    app_logger.warning(f"⚠️ Race condition detected while updating credits for {username}, retrying ({attempt+1}/{max_retries})...")
+                    time.sleep(0.2)  # Wait a bit before retrying
+                    continue
+
             else:
-                app_logger.info(f"✅ Credits updated for {username}")
+                app_logger.error(f"❌ Failed to update credits for {username} after {max_retries} attempts due to race conditions.")
+
         except Exception as e:
-            app_logger.info(f"❌ Exception updating credits for {username}: {str(e)}")
+            app_logger.error(f"❌ Exception updating credits for {username}: {str(e)}")
+
     else:
         app_logger.info(f"❌ Metadata missing in Checkout Session. Data: {json.dumps(session, indent=4)}")
+    return
 
 def handle_charge_succeeded(charge):
     app_logger.info(f"✅ Charge Succeeded")
+    return
  
 def handle_charge_updated(charge):
     app_logger.info(f"🔄 Charge Updated")
+    return
 
 def handle_payment_intent_created(charge):
     app_logger.info(f"✅ PaymentIntent Created")
+    return
 
 def handle_payment_failed(payment_intent):
     app_logger.info(f"❌ PaymentIntent failed")
+    return
 
+from flask_jwt_extended import get_jwt_identity
+
+from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
 
 def stripe_webhook_function(event):  
     try:
         event_type = event['type']
         event_data = event['data']['object']
-        
-         if event_type == 'payment_intent.succeeded':
-            handle_payment_intent_succeeded(event_data)
+        redis_client = get_redis_client()
 
+        username = None
+
+        # **Try extracting username from JWT (if available)**
+        try:
+            verify_jwt_in_request()
+            username = get_jwt_identity()
+        except Exception:
+            pass  # No need to log here; we handle fallback below
+
+        # **If JWT fails, extract from Stripe metadata**
+        if not username:
+            metadata = event_data.get('metadata', {})
+            username = metadata.get('username')
+
+        # **Handle missing username gracefully**
+        if not username:
+            app_logger.warning(f"⚠️ No username found in JWT or Stripe metadata for event: {event_type}")
+            return jsonify({"error": "Username not found"}), 400
+
+        # **Fetch initial credits before processing**
+        initial_credits = int(redis_client.hget(username, "credits") or 0)
+        app_logger.info(f"🚀 Start of Webhook Processing | Event: {event_type} | User: {username} | Initial Credits: {initial_credits}")
+
+        # **Process the event**
+        if event_type == 'payment_intent.succeeded':
+            handle_payment_intent_succeeded(event_data)
         elif event_type == 'checkout.session.completed':
             handle_checkout_session_completed(event_data)
-
         elif event_type == 'payment_intent.payment_failed':
             handle_payment_failed(event_data)
-
         elif event_type == 'charge.succeeded':
             handle_charge_succeeded(event_data)
-
         elif event_type == 'charge.updated':
             handle_charge_updated(event_data)
-            
         elif event_type == 'payment_intent.created':
             handle_payment_intent_created(event_data)
-            
         else:
             app_logger.warning(f"⚠️ Unhandled event type: {event_type}")
-            app_logger.info(f" {json.dumps(event, indent=4)}")
+            app_logger.info(f"{json.dumps(event, indent=4)}")
 
+        # **Fetch final credits after processing**
+        final_credits = int(redis_client.hget(username, "credits") or 0)
+        app_logger.info(f"🏁 End of Webhook Processing | Event: {event_type} | User: {username} | Final Credits: {final_credits}")
 
     except Exception as e:
         app_logger.error(f"❌ Error handling webhook event: {str(e)}")
@@ -206,7 +266,7 @@ def stripe_webhook_function(event):
 
 def create_tokens(username, role, daily_limit, hourly_limit, minute_limit, secret, access_expires, refresh_expires, check_existing_refresh=False):
     secret = str(secret)
-    app_logger.debug(f"Secret key type in create_tokens: {type(secret)} {secret}")
+    app_logger.debug(f"Secret key type in create_tokens: {secret}")
 
     additional_claims = {
         "role": role,
@@ -247,8 +307,8 @@ def create_tokens(username, role, daily_limit, hourly_limit, minute_limit, secre
         refresh_jti = decoded_refresh_token["jti"]
 
         # Convert the expiry times to string format before adding to Redis
-        access_expiry_str = (datetime.datetime.utcnow() + access_expires).isoformat()
-        refresh_expiry_str = (datetime.datetime.utcnow() + refresh_expires).isoformat()
+        access_expiry_str = (datetime.utcnow() + access_expires).isoformat()
+        refresh_expiry_str = (datetime.utcnow() + refresh_expires).isoformat()
 
         # Add the issued access and refresh tokens to the global Redis set for issued tokens
         # Use the global issued tokens key (set of all issued tokens)
@@ -283,26 +343,24 @@ def payment_success_function():
         # Get Redis client
         redis_client = get_redis_client()
 
-        # Fetch initial credits
+        # 🚨 Only log credits, do not modify them!
         initial_credits = redis_client.hget(username, "credits")
         initial_credits = int(initial_credits) if initial_credits else 0
         app_logger.info(f"🔹 Upon entering payment success credits for user {username}: {initial_credits}")
 
-        # Fetch the Stripe checkout session (just for confirmation/logging)
+        # Fetch the Stripe checkout session (only for logging)
         session = stripe.checkout.Session.retrieve(session_id)
         app_logger.debug(f"Session object: {session}")
 
-        # Fetch final credits
+        # ✅ Ensure we are NOT updating credits in this function
         final_credits = redis_client.hget(username, "credits")
         final_credits = int(final_credits) if final_credits else 0
         app_logger.info(f"✅ Upon exiting payment success credits for user {username}: {final_credits}")
 
-        # Render a success page, passing along username & session_id
         return render_template('success.html', username=username, session_id=session_id)
 
     except Exception as e:
         app_logger.error(f"Error in payment success: {str(e)}")
         app_logger.error(traceback.format_exc())
         return jsonify({"error": "Internal Server Error"}), 500
-
 
