@@ -2,37 +2,9 @@ import time
 import traceback
 from flask import jsonify, request
 from flask_jwt_extended import get_jwt
-from common import is_token_revoked
 from logs import app_logger
 import requests
 import subprocess
-
-def test_throughput_function():
-    try:
-        data = request.get_json()
-        count = int(data.get('count', 100))
-
-        if count < 1:
-            return jsonify({"msg": "Count must be at least 1"}), 400
-
-        # Get the current token's jti
-        access_jti = get_jwt()['jti']
-
-        # Measure throughput
-        start_time = time.time()
-
-        for _ in range(count):
-            is_token_revoked(access_jti)
-
-        duration = time.time() - start_time
-        throughput = count / duration
-
-        return jsonify({"throughput": round(throughput)}), 200
-
-    except Exception as e:
-        app_logger.error(f"Error during throughput test: {str(e)}")
-        app_logger.error(traceback.format_exc())
-        return jsonify({"error": "Internal Server Error"}), 500
 
 def cpu_usage_function(USERNAME,API_TOKEN):
     try:

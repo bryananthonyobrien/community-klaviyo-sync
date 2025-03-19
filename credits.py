@@ -4,16 +4,11 @@ from datetime import datetime
 import stripe
 import traceback
 from flask import jsonify, request, render_template
-from flask_jwt_extended import get_jwt_identity, create_access_token, create_refresh_token
+from flask_jwt_extended import get_jwt_identity, create_access_token, create_refresh_token, verify_jwt_in_request
 from logs import app_logger
-from cache import get_user_data
+from cache import get_user_data, get_redis_client
 import time
-    
-app_logger.debug("Importing common module in credits.py")
 from common import add_issued_token_function, revoke_all_access_tokens_for_user, decode_jwt, add_revoked_token_function
-from cache import get_redis_client
-
-app_logger.debug("Imported common module successfully in credits.py")
 
 # Set the Stripe API key
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
@@ -201,11 +196,7 @@ def handle_payment_intent_created(charge):
 def handle_payment_failed(payment_intent):
     app_logger.info(f"❌ PaymentIntent failed")
     return
-
-from flask_jwt_extended import get_jwt_identity
-
-from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
-
+    
 def stripe_webhook_function(event):  
     try:
         event_type = event['type']
@@ -263,10 +254,55 @@ def stripe_webhook_function(event):
 
     return jsonify({'status': 'success'}), 200
 
+def cleanup_revoked_tokens(username, redis_client):
+    """
+    Removes expired tokens from the revoked set to prevent bloat.
+    Aggregates logging to reduce log spam.
+    """
+    user_revoked_tokens_key = f"revoked_tokens:{username}"
+    revoked_tokens = redis_client.smembers(user_revoked_tokens_key)
+
+    if not revoked_tokens:
+        app_logger.info(f"🔍 No expired revoked tokens found for {username}.")
+        return
+
+    access_count = 0
+    refresh_count = 0
+    other_count = 0
+
+    for token_data in revoked_tokens:
+        try:
+            token_info = json.loads(token_data)
+            expiry_time = datetime.fromisoformat(token_info["expires_at"])
+            
+            # ✅ Remove only expired tokens
+            if expiry_time < datetime.utcnow():
+                token_type = token_info.get("type", "unknown")
+
+                if token_type == "access":
+                    access_count += 1
+                elif token_type == "refresh":
+                    refresh_count += 1
+                else:
+                    other_count += 1
+
+                redis_client.srem(user_revoked_tokens_key, token_data)  # Remove from Redis
+
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            app_logger.error(f"⚠️ Failed to process revoked token for {username}: {e}")
+
+    # 🔥 Log the aggregated count of removed tokens
+    total_removed = access_count + refresh_count + other_count
+    if total_removed > 0:
+        app_logger.info(
+            f"🗑️ Removed {access_count} access tokens, {refresh_count} refresh tokens, "
+            f"and {other_count} other tokens for {username}."
+        )
+    else:
+        app_logger.info(f"✅ No expired tokens needed removal for {username}.")
 
 def create_tokens(username, role, daily_limit, hourly_limit, minute_limit, secret, access_expires, refresh_expires, check_existing_refresh=False):
     secret = str(secret)
-    app_logger.debug(f"Secret key type in create_tokens: {secret}")
 
     additional_claims = {
         "role": role,
@@ -278,47 +314,69 @@ def create_tokens(username, role, daily_limit, hourly_limit, minute_limit, secre
     try:
         redis_client = get_redis_client()
 
-        # Revoke all existing access tokens from the global Redis set (not per user)
-        revoke_all_access_tokens_for_user(username, secret)
+        # Per-user keys
+        user_issued_tokens_key = f"issued_tokens:{username}"
+        user_revoked_tokens_key = f"revoked_tokens:{username}"
 
-        # Create a new access token
-        access_token = create_access_token(identity=username, additional_claims=additional_claims)
-        app_logger.debug(f"Created access token for user {username}")
+        # ✅ Revoke all access tokens and get remaining valid refresh tokens
+        valid_refresh_tokens = revoke_all_access_tokens_for_user(username, secret, redis_client)
 
-        # Check if there is an existing refresh token in Redis
+        # ✅ If we're checking for an existing refresh token
         refresh_token = None
-        if check_existing_refresh:
-            # Look for an existing refresh token in the global issued tokens set
-            existing_refresh_token = redis_client.sismember("issued_tokens", username)
-            if existing_refresh_token:
-                refresh_token = existing_refresh_token
-                app_logger.debug(f"Found existing refresh token for user {username}")
+        if check_existing_refresh and valid_refresh_tokens:
+            # Sort refresh tokens by expiry (latest first)
+            valid_refresh_tokens.sort(key=lambda t: datetime.fromisoformat(t["expires_at"]), reverse=True)
 
-        # If no existing refresh token, create a new one
+            most_recent_refresh = valid_refresh_tokens[0]["jwt"]
+            refresh_token = most_recent_refresh  # Use the latest valid refresh token
+
+            if len(valid_refresh_tokens) > 1:
+                app_logger.info(f" Moving {len(valid_refresh_tokens) - 1} old refresh token(s) to revoked set for {username}")
+
+                for token_info in valid_refresh_tokens[1:]:  # Revoke all but the most recent one
+                    add_revoked_token_function(
+                        jti=token_info["jti"],
+                        username=username,
+                        jwt=token_info["jwt"],
+                        expires_at=token_info["expires_at"],  # Ensure this is in ISO format
+                        redis_client=redis_client
+                    )
+                    redis_client.srem(user_issued_tokens_key, json.dumps(token_info))  # Remove from issued tokens
+
+        else:
+            app_logger.debug(f" Always creating a new refresh token for {username}")
+
+        # ✅ If no refresh token exists, generate a new one
         if not refresh_token:
             refresh_token = create_refresh_token(identity=username, additional_claims=additional_claims)
-            app_logger.debug(f"Created new refresh token for user {username}")
+            app_logger.debug(f" Created new refresh token for user {username}")
 
-        # Decode the access and refresh tokens to get their JTI (JWT ID)
-        decoded_access_token = decode_jwt(access_token, secret)
-        decoded_refresh_token = decode_jwt(refresh_token, secret)
+        # ✅ Create a new access token
+        access_token = create_access_token(identity=username, additional_claims=additional_claims)
+        app_logger.debug(f" Created access token for user {username}")
+
+        # ✅ Decode tokens to get JTI (JWT ID)
+        decoded_access_token = decode_jwt(access_token, secret, allow_expired=False)
+        decoded_refresh_token = decode_jwt(refresh_token, secret, allow_expired=False)
 
         access_jti = decoded_access_token["jti"]
         refresh_jti = decoded_refresh_token["jti"]
 
-        # Convert the expiry times to string format before adding to Redis
+        # ✅ Convert expiry times to string format before storing in Redis
         access_expiry_str = (datetime.utcnow() + access_expires).isoformat()
         refresh_expiry_str = (datetime.utcnow() + refresh_expires).isoformat()
 
-        # Add the issued access and refresh tokens to the global Redis set for issued tokens
-        # Use the global issued tokens key (set of all issued tokens)
+        # ✅ Store issued access and refresh tokens under the per-user Redis set
         add_issued_token_function(access_jti, username, access_token, access_expiry_str, 'access', redis_client)
-        
-        if not existing_refresh_token:
+
+        if not valid_refresh_tokens:
             add_issued_token_function(refresh_jti, username, refresh_token, refresh_expiry_str, 'refresh', redis_client)
 
+        # ✅ Cleanup expired tokens from the revoked set
+        cleanup_revoked_tokens(username, redis_client)
+
     except Exception as e:
-        app_logger.error(f"Error during token creation for user {username}: {str(e)}")
+        app_logger.error(f"🚨 Error during token creation for user {username}: {str(e)}")
         raise  # Re-raise the exception after logging
 
     return access_token, refresh_token

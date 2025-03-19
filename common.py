@@ -25,23 +25,9 @@ def decode_redis_values(user_data):
             decoded_data[key] = value
     return decoded_data
     
-def is_token_revoked(jti):
-    try:
-        redis_client = get_redis_client()
-        revoked_tokens_key = "revoked_tokens"  # The Redis key holding the revoked tokens
+from jwt import decode, ExpiredSignatureError, InvalidSignatureError, DecodeError
 
-        # Check if the 'jti' exists in the Redis set (which stores revoked token 'jti')
-        is_revoked = redis_client.sismember(revoked_tokens_key, jti)  # Using set for revoked tokens
-        return is_revoked
-    except redis.RedisError as e:
-        app_logger.error(f"Redis error in is_token_revoked: {str(e)}")
-        return False
-    except Exception as e:
-        app_logger.error(f"Error checking if token is revoked: {str(e)}")
-        return False
-
-def decode_jwt(token, secret_key, allow_expired=False):
-    app_logger.debug(f"decode_jwt : Secret key used {secret_key}")
+def decode_jwt(token, secret_key, allow_expired=True):
 
     if not isinstance(token, str):
         app_logger.error(f"Token is not a string: {token}")
@@ -52,129 +38,173 @@ def decode_jwt(token, secret_key, allow_expired=False):
         raise TypeError("Expected a string value for secret key")
 
     try:
-        options = {"verify_exp": not allow_expired}
-        return decode(token, secret_key, algorithms=["HS256"], options=options)
+        options = {"verify_exp": not allow_expired}  # Disable expiration check when allow_expired=True
+        app_logger.debug(f"Decoding with options: {options}")
+
+        payload = decode(token, secret_key, algorithms=["HS256"], options=options)
+        app_logger.debug(f"Decoded token payload: {payload}")  # Debug print full decoded payload
+        return payload
+
     except ExpiredSignatureError as e:
+        app_logger.warning(f"Token has expired: {e}")
         if allow_expired:
-            app_logger.warning("Token has expired, but decoding is allowed with expired tokens.")
-            return decode(token, secret_key, algorithms=["HS256"], options={"verify_exp": False})
+            try:
+                payload = decode(token, secret_key, algorithms=["HS256"], options={"verify_exp": False})
+                app_logger.debug(f"Decoded expired token payload: {payload}")
+                return payload
+            except Exception as nested_error:
+                app_logger.error(f"Error decoding expired token: {nested_error}")
+                return None
         else:
-            app_logger.error("Token has expired and decoding is not allowed.")
-            raise e
+            return None  # Return None instead of raising if you want to prevent crashes
+
     except InvalidSignatureError as e:
-        app_logger.error("Invalid JWT signature detected.")
-        raise e
+        app_logger.error(f"Invalid JWT signature: {e}")
+        return None
+
+    except DecodeError as e:
+        app_logger.error(f"Error decoding JWT token: {e}")
+        return None
+
     except Exception as e:
-        app_logger.error(f"Error decoding JWT token: {str(e)}")
-        raise
-        
+        app_logger.error(f"Unexpected error decoding JWT: {e}")
+        return None
+
 def revoke_all_access_tokens_for_user(username, secret, redis_client=None):
-    app_logger.debug(f"Revoking all access tokens for {username}")
     try:
         if redis_client is None:
             redis_client = get_redis_client()
 
-        # Global keys for issued and revoked tokens (sets)
-        issued_tokens_key = "issued_tokens"
-        revoked_tokens_key = "revoked_tokens"
+        issued_tokens_key = f"issued_tokens:{username}"
+        revoked_tokens_key = f"revoked_tokens:{username}"
 
-        # Check if the sets are empty, skip if there are no tokens
         tokens = redis_client.smembers(issued_tokens_key)
+        app_logger.info(f"📡 Raw issued tokens set for {username}: {tokens}")  # Debugging
 
         if not tokens:
-            app_logger.info(f"No tokens found for user {username}.")
-            return
+            app_logger.info(f"🔍 No issued access tokens found for user {username}.")
+            return []
 
-        # Iterate over the tokens and revoke the user's access and refresh tokens
-        for jti in tokens:
-            if not jti:  # Skip empty jti tokens
-                app_logger.warning(f"Skipping empty token for user {username}")
-                continue
-
+        decoded_tokens = []
+        for token in tokens:
             try:
-                # Decode the token data stored in the set (stored as JSON)
-                token_data = json.loads(jti.decode('utf-8'))  # Decode byte string to UTF-8 string
+                token_str = token.decode("utf-8")  # ✅ Decode from bytes
+                app_logger.info(f"📜 Decoded raw token string: {token_str}")  # Debugging
+                decoded_tokens.append(json.loads(token_str))  # ✅ Convert to dictionary
+            except json.JSONDecodeError:
+                app_logger.error(f"🚨 Failed to decode token for {username}: {token_str}")
 
-                jwt_token = token_data.get('jwt')
-                expires_at = token_data.get('expires_at')
-                token_username = token_data.get('username')  # Extract the username from the token data
+        total_tokens = len(decoded_tokens)
+        revoked_count = 0
+        remaining_refresh_tokens = []
 
-                # Skip if the token doesn't belong to the requested username
+        for token_data in decoded_tokens:
+            try:
+                jwt_token = token_data.get("jwt")
+                expires_at = token_data.get("expires_at")
+                token_username = token_data.get("username")
+
                 if token_username != username:
                     continue
 
-                # Decode JWT to verify its type and check if it's an access token
                 decoded_jwt = decode_jwt(jwt_token, secret, allow_expired=True)
+                app_logger.info(f"🔑 Decoded JWT: {decoded_jwt}")  # Debugging
 
-                if decoded_jwt.get('type') == 'access':
-                    # Add the token to the global revoked tokens list
-                    redis_client.sadd(revoked_tokens_key, jti)  # Adding to global revoked tokens set
+                if decoded_jwt.get("type") == "access":
+                    redis_client.sadd(revoked_tokens_key, json.dumps(token_data))
 
-                    # Remove the token from the global issued tokens in Redis
-                    redis_client.srem(issued_tokens_key, jti)
-                    app_logger.debug(f"Revoked and deleted access token {jti} for user {username}")
+                    json_token_data = json.dumps(token_data)  # Ensure exact format
+                    if redis_client.sismember(issued_tokens_key, json_token_data):
+                        redis_client.srem(issued_tokens_key, json_token_data)  # ✅ Exact match required
+                        app_logger.info(f"🚨 Removed token {json_token_data} from {issued_tokens_key}")
+                    else:
+                        app_logger.warning(f"⚠️ Token {json_token_data} was NOT found in {issued_tokens_key}!")
+
+                    revoked_count += 1
                 else:
-                    app_logger.debug(f"Token {jti} for user {username} is not an access token, skipping.")
-            except Exception as e:
-                app_logger.error(f"Error decoding or processing token {jti} for user {username}: {str(e)}")
-                continue
+                    remaining_refresh_tokens.append(token_data)
 
-        app_logger.debug(f"Revoked all access tokens for user: {username}")
+            except Exception as e:
+                app_logger.error(f"🚨 Error processing token {token_data} for user {username}: {str(e)}")
+
+        app_logger.info(f"🟢 Processed {total_tokens} issued tokens for user {username}.")
+        app_logger.info(f"🛑 Revoked {revoked_count} access tokens for user {username}.")
+        app_logger.info(f"🔄 Remaining refresh tokens: {len(remaining_refresh_tokens)} for user {username}.")
+
+        return remaining_refresh_tokens
 
     except Exception as e:
-        app_logger.error(f"Error revoking access tokens for user {username}: {str(e)}")
+        app_logger.error(f"❌ Error revoking access tokens for user {username}: {str(e)}")
         raise e  
-              
+
 def add_revoked_token_function(jti, username, jwt, expires_at, redis_client=None):
     try:
         if redis_client is None:
             redis_client = get_redis_client()
 
-        # Define the key for the global revoked tokens list in Redis
-        revoked_tokens_key = "revoked_tokens"  # Use the global key
+        # Define the per-user key for revoked tokens in Redis
+        revoked_tokens_key = f"revoked_tokens:{username}"  # Per-user revoked tokens key
 
         # Ensure 'expires_at' is a string (ISO format) if it's a datetime object
         if isinstance(expires_at, datetime.datetime):
             expires_at = expires_at.isoformat()  # Convert datetime to string
 
-        # Prepare the token data as a dictionary or JSON object
+        # 1️⃣ Clean up expired tokens before adding a new one
+        existing_tokens = redis_client.smembers(revoked_tokens_key)
+        now = datetime.datetime.utcnow()
+
+        for token_data in existing_tokens:
+            try:
+                token_json = json.loads(token_data.decode('utf-8'))
+                token_expiry = datetime.datetime.fromisoformat(token_json["expires_at"])
+
+                # If the token is expired, remove it from Redis
+                if token_expiry < now:
+                    redis_client.srem(revoked_tokens_key, token_data)
+                    app_logger.debug(f"🗑️ Removed expired revoked token {token_json['jti']} for {username}")
+
+            except Exception as e:
+                app_logger.warning(f"⚠️ Skipping invalid token data in revoked set: {e}")
+
+        # 2️⃣ Prepare the token data as a dictionary or JSON object
         token_data = {
             "jti": jti,
-            "username": username,  # Optionally include the username for tracking
+            "username": username,  # Keep username for tracking
             "jwt": jwt,
             "expires_at": expires_at
         }
 
-        # Store the revoked token in Redis using the global set (sadd) instead of hset
+        # 3️⃣ Store the revoked token in Redis using the per-user set
         redis_client.sadd(revoked_tokens_key, json.dumps(token_data))  # Store as a set member
 
-        app_logger.debug(f"Successfully added revoked token: {jti} for user {username} with expiry {expires_at} to global Redis set.")
+        app_logger.debug(f"🚫 Successfully added revoked token: {jti} for user {username} with expiry {expires_at} to per-user Redis set.")
 
     except Exception as e:
-        app_logger.error(f"Error adding revoked token: {jti} for user {username} in Redis: {str(e)}")
+        app_logger.error(f"❌ Error adding revoked token: {jti} for user {username} in Redis: {str(e)}")
         raise e
-        
+
+      
 def add_issued_token_function(jti, username, jwt, expires_at, token_type, redis_client=None):
     try:
         if redis_client is None:
             redis_client = get_redis_client()
 
-        # Define the key for the global issued tokens list in Redis
-        issued_tokens_key = "issued_tokens"  # Use the global key
+        # Define the per-user key for issued tokens in Redis
+        issued_tokens_key = f"issued_tokens:{username}"  # Per-user issued tokens key
 
         # Prepare the token data as a dictionary or JSON object
         token_data = {
             "jti": jti,
-            "username": username,  # Optionally include the username for tracking
+            "username": username,  # Keep username for tracking
             "jwt": jwt,
             "expires_at": expires_at,  # Already a string from isoformat()
             "type": token_type
         }
 
-        # Store the issued token in Redis using the global set (sadd) instead of hset
+        # Store the issued token in Redis using the per-user set
         redis_client.sadd(issued_tokens_key, json.dumps(token_data))  # Store as a set member
 
-        app_logger.debug(f"Successfully added issued {token_type} token: {jti} for user {username} with expiry {expires_at} to global Redis set.")
+        app_logger.debug(f"Successfully added issued {token_type} token: {jti} for user {username} with expiry {expires_at} to Redis set.")
 
     except Exception as e:
         app_logger.error(f"Error adding issued token: {jti} for user {username} in Redis: {str(e)}")

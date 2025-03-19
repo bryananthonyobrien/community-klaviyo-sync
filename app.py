@@ -1,49 +1,64 @@
-from logs import app_logger
+import os
+import sys  # System functions
+import json
 import time
+import zipfile
+import sqlite3
+import threading
+import traceback
 import requests
 import urllib.parse
+import redis
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone  # Consolidated datetime imports
 from dateutil import parser
-from datetime import timezone
-from mappings import country_mappings
-from flask import Flask, request, jsonify, render_template, redirect, url_for, session
-from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity, get_jwt
+from functools import wraps
+
+# Flask & Extensions
+from flask import (
+    Flask, request, jsonify, render_template, redirect, url_for, 
+    session, send_file, abort, Response, has_request_context
+)
+from flask_jwt_extended import (
+    JWTManager, jwt_required, get_jwt_identity, get_jwt, decode_token
+)
 from flask_cors import CORS, cross_origin
 from flask_talisman import Talisman
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_limiter.errors import RateLimitExceeded
 from flask_sslify import SSLify
 from dotenv import load_dotenv, find_dotenv
 from tenacity import retry, wait_fixed, stop_after_attempt
-from jwt import ExpiredSignatureError
-import os
-import sqlite3
-import threading
-import traceback
-from flask_limiter.errors import RateLimitExceeded
-from functools import wraps
-from klaviyo import do_klaviyo_discovery, get_redis_client
-from community import Community_subscription_create, create_sub_community_tag
-import json
-import zipfile
-from flask import send_file, abort
-from flask import Response
-import redis
-from datetime import datetime, timedelta  # Ensure this import is included
-from ipinfo import create_ipinfo_cache_file, load_ipinfo_cache, update_ipinfo_cache_file, is_valid_ip, do_ip_address_look_up
-import sys  # Ensure this is imported
+from jwt import ExpiredSignatureError, DecodeError
 
-# Import custom modules
-from cache import get_user_data, clash_members_and_profiles, create_stage_csv_files
-app_logger.info("Importing credits module in app.py")
-from credits import create_tokens, cancel_payment_function, payment_success_function, create_checkout_session_function, stripe_webhook_function
-app_logger.info("Imported credits module successfully in app.py")
-app_logger.info("Importing common module in app.py")
-from common import is_token_revoked, add_issued_token_function, revoke_all_access_tokens_for_user, decode_jwt, add_revoked_token_function, DEFAULT_DAILY_LIMIT, DEFAULT_HOURLY_LIMIT, DEFAULT_MINUTE_LIMIT
-app_logger.info("Imported common module successfully in app.py")
+# Logging
+from logs import app_logger
+
+# Custom Modules (Grouped by Functionality)
+from cache import (
+    get_user_data, clash_members_and_profiles, create_stage_csv_files
+)
+from credits import (
+    create_tokens, cancel_payment_function, payment_success_function,
+    create_checkout_session_function, stripe_webhook_function
+)
+from common import (
+    add_issued_token_function, revoke_all_access_tokens_for_user,
+    decode_jwt, add_revoked_token_function, 
+    DEFAULT_DAILY_LIMIT, DEFAULT_HOURLY_LIMIT, DEFAULT_MINUTE_LIMIT, decode_redis_values
+)
 from login import login_function
 from logout import logout_function
-from monitoring import test_throughput_function, cpu_usage_function, get_cpu_usage_function, get_file_storage_usage_function
+from monitoring import (
+    cpu_usage_function, get_cpu_usage_function, get_file_storage_usage_function
+)
+from klaviyo import do_klaviyo_discovery, get_redis_client
+from community import Community_subscription_create, create_sub_community_tag
+from ipinfo import (
+    create_ipinfo_cache_file, load_ipinfo_cache, 
+    update_ipinfo_cache_file, is_valid_ip, do_ip_address_look_up
+)
 
 def measure_time(func):
     def wrapper(*args, **kwargs):
@@ -93,23 +108,128 @@ if not jwt_secret_key:
 app.config['JWT_SECRET_KEY'] = str(jwt_secret_key)
 app.config['SECRET_KEY'] = str(jwt_secret_key)  # Set the SECRET_KEY for Flask sessions
 
-# Log the secret keys
-app_logger.info(f"JWT_SECRET_KEY set: {app.config['JWT_SECRET_KEY']}")
-app_logger.info(f"SECRET_KEY set for Flask sessions: {app.config['SECRET_KEY']}")
 
 # Continue with the rest of your configuration
 jwt = JWTManager(app)
-app_logger.info("Created JWTManager")
+app_logger.info("Initialized JWTManager")
+
+from limits.storage import RedisStorage, RedisClusterStorage, RedisSentinelStorage, MemcachedStorage, MemoryStorage, MongoDBStorage, EtcdStorage
+
+def log_flask_limiter_backends():
+    """Logs available Flask-Limiter storage backends"""
+    supported_backends = [
+        RedisStorage,
+        RedisClusterStorage,
+        RedisSentinelStorage,
+        MemcachedStorage,
+        MemoryStorage,
+        MongoDBStorage,
+        EtcdStorage,
+    ]
+    
+    app_logger.info("✅ Flask-Limiter Supported Backends:")
+    for backend in supported_backends:
+        app_logger.info(f" - {backend.__name__}")
 
 # Initialize Redis client
 redis_client = get_redis_client()
 
-# Set up rate limiting using Redis as storage
+# Build Redis Storage URI
+redis_uri = f"redis://:{os.getenv('REDIS_PASSWORD')}@{os.getenv('REDIS_HOST')}:{os.getenv('REDIS_PORT')}/{os.getenv('REDIS_DB', 0)}"
+
+def clear_old_limits():
+    """Ensures only one worker performs Redis cleanup, logs backends, and checks limit keys."""
+    try:
+        redis_client = redis.from_url(redis_uri)
+        redis_client.ping()
+
+        # Use a Redis lock to ensure only one worker executes this function
+        lock_key = "rate_limit_cleanup_lock"
+        lock_acquired = redis_client.set(lock_key, "locked", ex=10, nx=True)  # Lock expires after 10s
+
+        if lock_acquired:  # If this worker acquired the lock
+            app_logger.info("✅ Redis is connected successfully! Checking if cleanup is needed...")
+            app_logger.info("🔒 Lock acquired! This worker is responsible for rate limit cleanup and logging.")
+
+            app_logger.info(f"🚀 Rate Limiter Storage URI: {redis_uri}")
+
+            # ✅ Log Flask-Limiter Supported Backends
+            supported_backends = [
+                "RedisStorage", "RedisClusterStorage", "RedisSentinelStorage",
+                "MemcachedStorage", "MemoryStorage", "MongoDBStorage", "EtcdStorage"
+            ]
+            app_logger.info("✅ Flask-Limiter Supported Backends:")
+            for backend in supported_backends:
+                app_logger.info(f"  - {backend}")
+
+            # 🔍 Find old rate limit keys
+            limit_keys = redis_client.keys("LIMITS:LIMITER/*")
+            if limit_keys:
+                decoded_keys = [key.decode() for key in limit_keys]  # Convert bytes to strings
+                app_logger.info(f"🔍 Found {len(decoded_keys)} old rate limit keys in Redis:")
+                for key in decoded_keys:
+                    app_logger.info(f"🗑️ Deleting: {key}")
+                redis_client.delete(*limit_keys)
+                app_logger.info(f"✅ Successfully cleared {len(decoded_keys)} rate limit keys from Redis.")
+            else:
+                app_logger.info("⚠️ No previous rate limit keys found. Nothing to delete.")
+
+            # 🔍 Check for user rate limit structures
+            user_limit_keys = redis_client.keys("*:limits")
+            if user_limit_keys:
+                app_logger.info(f"🔍 Found {len(user_limit_keys)} user limit structures in Redis:")
+                for key in user_limit_keys:
+                    app_logger.info(f"📝 {key}: {redis_client.hgetall(key)}")
+            else:
+                app_logger.info("⚠️ No user limit structures found in Redis.")
+
+    except Exception as e:
+        app_logger.error(f"🚨 Failed to clear old limits: {e}")
+
+def test_redis_limits_keys():
+    """Tests Redis connection and fetches all `*:limits` keys."""
+    try:
+        redis_client = redis.from_url(redis_uri)
+        redis_client.ping()
+        app_logger.info("✅ Redis is connected successfully!")
+
+        # Fetch all keys that match the pattern "*:limits"
+        limit_keys = redis_client.keys("*:limits")
+        
+        if limit_keys:
+            app_logger.info(f"🔍 Found {len(limit_keys)} user limit structures in Redis:")
+            for key in limit_keys:
+                limits_data = redis_client.hgetall(key)
+                decoded_limits = {k.decode(): int(v) for k, v in limits_data.items()}  # Decode byte values
+                app_logger.info(f"📝 {key.decode()}: {decoded_limits}")
+        else:
+            app_logger.info("⚠️ No user limits found in Redis.")
+
+    except Exception as e:
+        app_logger.error(f"🚨 Redis connection failed: {e}")
+
+def user_id_limiter():
+    """
+    Rate limiter function that uses JWT identity if available, otherwise falls back to remote address.
+    Skips JWT verification for login requests.
+    """
+    try:
+        if request.endpoint != "login":  # ✅ Skip JWT check for login
+            verify_jwt_in_request(optional=True)  # Allow JWT verification only for other routes
+        return get_jwt_identity() or get_remote_address()
+    except RuntimeError:
+        return get_remote_address()  # Default to IP address if no JWT is available
+
+
+# Run cleanup on app startup
+clear_old_limits()
+
+# Initialize Flask-Limiter
 limiter = Limiter(
-    get_remote_address,
+    key_func=user_id_limiter,
     app=app,
-    default_limits=["200 per day", "50 per hour"],
-    storage_uri=f"redis://:{os.getenv('REDIS_PASSWORD')}@{os.getenv('REDIS_HOST')}:{os.getenv('REDIS_PORT')}/{os.getenv('REDIS_DB', 0)}"
+    default_limits=["1440 per day", "60 per hour"],
+    storage_uri=redis_uri
 )
 
 # Replace these with your PythonAnywhere username and API token
@@ -164,16 +284,57 @@ def fetch_rate_limit_from_redis(user_id):
     app_logger.info(f"No rate limits found for user {user_id}")
     return None
     
-# Dynamically determine rate limits
+# Dynamically determine rate limits from Redis
 def get_dynamic_rate_limit():
+    redis_client = get_redis_client()
+
+    # Ensure function runs in a request context
+    if not has_request_context():
+        app_logger.info("[no request context] Dynamic rate limits defaulted to 10 per minute; 100 per hour; 1000 per day")
+        return "10 per minute; 100 per hour; 1000 per day"  # Safe fallback
+
     user_identity = get_jwt_identity()
-    user_rate_limit = fetch_rate_limit_from_db(user_identity)
+    if not user_identity:
+        app_logger.warning("⚠️ No user identity found, using default rate limits.")
+        return "10 per minute; 100 per hour; 1000 per day"  # Safe fallback for anonymous users
 
-    if user_rate_limit:
-        daily_limit, hourly_limit, minute_limit = user_rate_limit
+    limits_key = f"{user_identity}:limits"
+
+    # ✅ Fetch limits from Redis
+    limits = redis_client.hgetall(limits_key)
+
+    if limits:
+        limits = decode_redis_values(limits)  # Convert from byte strings
+        try:
+            daily_limit = int(limits.get("daily_limit", 1000))
+            hourly_limit = int(limits.get("hourly_limit", 100))
+            minute_limit = int(limits.get("minute_limit", 10))
+        except ValueError:
+            app_logger.error(f"🚨 Invalid rate limit values for {user_identity}, using defaults.")
+            return "10 per minute; 100 per hour; 1000 per day"
+
+        app_logger.info(f"✅ Dynamic rate limits for {user_identity}: {minute_limit} per minute; {hourly_limit} per hour; {daily_limit} per day")
         return f"{minute_limit} per minute; {hourly_limit} per hour; {daily_limit} per day"
-    return "1000 per minute; 5000 per hour; 10000 per day"
 
+    # ❌ If no limits exist, log a warning and return safe defaults
+    app_logger.warning(f"⚠️ No rate limits found for {user_identity}, using default values.")
+    return "10 per minute; 100 per hour; 1000 per day"
+    
+@jwt.invalid_token_loader
+def invalid_token_callback(reason):
+    if request.endpoint == "login":
+        return
+    app_logger.error(f"Invalid Token: {reason}")  # Add detailed logging
+    return jsonify({"msg": "Invalid token", "status": "INVALID"}), 401
+
+@jwt.expired_token_loader
+def expired_token_callback(jwt_header, jwt_data):
+    return jsonify({"msg": "Token has expired"}), 401
+
+@jwt.unauthorized_loader
+def missing_token_callback(reason):
+    return jsonify({"msg": "Unauthorized"}), 401
+    
 @retry(wait=wait_fixed(1), stop=stop_after_attempt(10))
 def add_revoked_token(jti, username, jwt, expires_at, conn=None):
     return add_revoked_token_function(jti, username, jwt, expires_at, conn=None)
@@ -182,44 +343,73 @@ def add_revoked_token(jti, username, jwt, expires_at, conn=None):
 def add_issued_token(jti, username, jwt, expires_at, conn=None):
     return add_issued_token_function(jti, username, jwt, expires_at, conn=None)
 
+def debug_jwt_payload(jwt_header, jwt_payload, app_logger):
+    """
+    Debug function to inspect the contents of a JWT payload and header.
 
-# Configure JWT to use the revoked token check
+    :param jwt_header: The decoded JWT header.
+    :param jwt_payload: The decoded JWT payload.
+    :param app_logger: Logger instance to log the JWT details.
+    """
+    app_logger.info("\n🔍 Debugging JWT Token:")
+
+    # Log JWT Header
+    app_logger.info("\n🔹 JWT Header:")
+    app_logger.info(json.dumps(jwt_header, indent=4))
+
+    # Log JWT Payload
+    app_logger.info("\n🔹 JWT Payload:")
+    app_logger.info(json.dumps(jwt_payload, indent=4))
+
+    # Extract key claims
+    jti = jwt_payload.get("jti")
+    sub = jwt_payload.get("sub")  # Typically the username
+    exp = jwt_payload.get("exp")
+    role = jwt_payload.get("role")
+
+    app_logger.info("\n🔹 Extracted Claims:")
+    app_logger.info(f"🆔 JTI: {jti}")
+    app_logger.info(f"👤 User: {sub}")
+    app_logger.info(f"🔖 Role: {role}")
+
+    if exp:
+        exp_datetime = datetime.utcfromtimestamp(exp)
+        app_logger.info(f"⏳ Token Expiry (UTC): {exp_datetime}")
+    else:
+        app_logger.info("❌ Expiry Not Found in JWT")
+
 @jwt.token_in_blocklist_loader
 def check_if_token_revoked(jwt_header, jwt_payload):
-    jti = jwt_payload['jti']
-    return is_token_revoked(jti)
+    """
+    Checks if a given JWT is in the revoked tokens list.
+    """
+    jti = jwt_payload.get("jti")
+    username = jwt_payload.get("sub")  # Use "sub" as it's the standard claim for identity
 
-# Fetch jti and username from Redis (global issued_tokens set)
-def get_jti_and_username(jti):
-    try:
-        # Connect to Redis
-        redis_client = Redis(
-            host=app.config['REDIS_HOST'],
-            port=app.config['REDIS_PORT'],
-            password=app.config['REDIS_PASSWORD'],
-            db=app.config['REDIS_DB']
-        )
-        
-        # Define the Redis key for the global issued_tokens set
-        issued_tokens_key = "issued_tokens"
+    if not jti or not username:
+        app_logger.error(f"⚠️ JWT missing required claims")
+        return True  # Reject token since it’s missing required claims
 
-        # Fetch the token data for the given jti from the global set
-        token_data = redis_client.hget(issued_tokens_key, jti)
+    # 🔍 Debugging: Log the JWT contents
+    debug_jwt_payload(jwt_header, jwt_payload, app_logger)
 
-        if token_data:
-            # Decode the byte value and parse JSON string to dictionary
-            token_data = token_data.decode('utf-8')
-            token_dict = json.loads(token_data)
-            
-            # Return the jti and associated username
-            return jti, token_dict.get("username")
-        
-        return None, None
+    redis_client = get_redis_client()
+    revoked_tokens_key = f"revoked_tokens:{username}"  # Per-user revoked tokens key
 
-    except Exception as e:
-        app_logger.info(f"Error getting jti and username from Redis: {str(e)}")
-        return None, None
-        
+    # Get all revoked tokens for the user
+    revoked_tokens = redis_client.smembers(revoked_tokens_key)
+
+    for token_data in revoked_tokens:
+        try:
+            token_dict = json.loads(token_data.decode("utf-8"))  # Decode from Redis
+            if token_dict.get("jti") == jti:
+                app_logger.info(f"🚫 Token {jti} for user {username} is revoked.")
+                return True  # Reject request
+        except json.JSONDecodeError as e:
+            app_logger.error(f"⚠️ Error decoding revoked token: {e}")
+
+    return False  # Token is still valid
+    
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -247,12 +437,19 @@ def log_request_start():
             g.username = None  # Ensure username is explicitly set to None
             return  
 
-        # Extract username from JWT for other routes
-        username = get_jwt_identity()
-        user_credits = redis_client.hget(username, "credits")
-        user_credits = int(user_credits) if user_credits else 0
+        # ✅ Ensure a JWT exists before extracting identity
+        if "Authorization" in request.headers and "Bearer " in request.headers["Authorization"]:
+            try:
+                username = get_jwt_identity()  # ✅ Extract safely after ensuring JWT exists
+                user_credits = redis_client.hget(username, "credits")
+                user_credits = int(user_credits) if user_credits else 0
+            except Exception as jwt_error:
+                app_logger.warning(f"⚠️ JWT extraction failed: {str(jwt_error)}")
+                username, user_credits = None, 0
+        else:
+            username, user_credits = None, 0  # No JWT present
 
-        # Store for later use in after_request
+        # Store for later use in `after_request`
         g.initial_credits = user_credits
         g.username = username  
 
@@ -824,15 +1021,188 @@ def admin_panel():
 def client_panel():
     return render_template('client.html')
 
+@app.route('/test-token', methods=['GET'])
+@cross_origin()
+@jwt_required()
+@limiter.limit(lambda: get_dynamic_rate_limit())  # Pass function as a callable for dynamic rate limiting
+def test_token():
+    """
+    Tests the validity of a provided JWT token.
+    Returns whether it's valid or not, along with the reason.
+    """
+    try:
+        # Extract JWT token data from request
+        jwt_data = get_jwt()  # This will raise an error if the token is invalid or tampered
+        username = jwt_data.get("sub")  # Extract the username (identity)
+        jti = jwt_data.get("jti")  # Extract unique token identifier
+        exp_timestamp = jwt_data.get("exp")  # Expiration timestamp
+        exp_time = datetime.utcfromtimestamp(exp_timestamp)
+        time_remaining = (exp_time - datetime.utcnow()).total_seconds()
+
+        # Get the Redis client for checking revoked tokens
+        redis_client = get_redis_client()
+        revoked_tokens_key = f"revoked_tokens:{username}"
+
+        # Get all revoked tokens for the user
+        revoked_tokens = redis_client.smembers(revoked_tokens_key)
+        revoked_jti_list = [json.loads(token.decode("utf-8"))["jti"] for token in revoked_tokens]
+
+        # Debugging information
+        app_logger.info(f"🔍 Revoked Tokens for {username}: {revoked_jti_list}")
+        app_logger.info(f"🔍 Current Token JTI: {jti}")
+
+        # Check if this token is revoked
+        if jti in revoked_jti_list:
+            response = {
+                "msg": "Token is revoked",
+                "status": "REVOKED",
+                "revoked_token_count": len(revoked_jti_list)
+            }
+            app_logger.warning(f"🔴 Token Test Failed: {response}")
+            return jsonify(response), 401
+
+        # If not revoked, return valid token response
+        response = {
+            "msg": "Token is valid",
+            "decoded_token": jwt_data,
+            "expires_at_utc": exp_time.strftime('%Y-%m-%d %H:%M:%S UTC'),
+            "time_remaining_seconds": max(0, int(time_remaining)),  # Ensure non-negative remaining time
+            "status": "VALID",
+            "revoked_token_count": len(revoked_jti_list)
+        }
+        app_logger.info(f"✅ Token Test Success: {response}")
+        return jsonify(response), 200
+
+    except DecodeError:
+        # Return the response with 'status' key for tampered/invalid token
+        response = {"msg": "Token is invalid", "status": "INVALID"}
+        app_logger.warning(f"🔴 Token Test Failed: {response}")
+        return jsonify(response), 401
+
+    except Exception as e:
+        # Generic error handling
+        app_logger.error(f"🚨 Error testing token: {str(e)}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
+@app.route('/test-token_old', methods=['GET'])
+@cross_origin()
+@jwt_required() 
+@limiter.limit(lambda: get_dynamic_rate_limit())  # Pass function as a callable
+def test_token_old():
+    """
+    Tests the validity of a provided JWT token.
+    Returns whether it's valid or not, along with the reason.
+    """
+    try:
+        # Extract token from Authorization header
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or "Bearer " not in auth_header:
+            response = {"msg": "No token provided", "status": "MISSING_TOKEN"}
+            app_logger.warning(f"🔴 Token Test Failed: {response}")
+            return jsonify(response), 401
+
+        token = auth_header.split("Bearer ")[1].strip()
+
+        # Attempt to decode the token with expiration verification
+        try:
+            jwt_data = decode_token(token, allow_expired=False)  # ✅ Ensure expiration check
+
+            # Extract expiration time
+            exp_timestamp = jwt_data.get("exp")
+            exp_time = datetime.utcfromtimestamp(exp_timestamp)
+            time_remaining = (exp_time - datetime.utcnow()).total_seconds()
+
+            # Check if token is revoked
+            redis_client = get_redis_client()
+            revoked_tokens_key = f"revoked_tokens:{jwt_data.get('sub')}"
+            if redis_client.sismember(revoked_tokens_key, token):
+                response = {"msg": "Token is revoked", "status": "REVOKED"}
+                app_logger.warning(f"🔴 Token Test Failed: {response}")
+                return jsonify(response), 401
+
+            response = {
+                "msg": "Token is valid",
+                "decoded_token": jwt_data,
+                "expires_at_utc": exp_time.strftime('%Y-%m-%d %H:%M:%S UTC'),
+                "time_remaining_seconds": max(0, int(time_remaining)),  # Ensure non-negative
+                "status": "VALID"
+            }
+            app_logger.info(f"✅ Token Test Success: {response}")
+            return jsonify(response), 200
+
+        except ExpiredSignatureError:
+            response = {"msg": "Token has expired", "status": "EXPIRED"}
+            app_logger.warning(f"🔴 Token Test Failed: {response}")
+            return jsonify(response), 401
+
+        except DecodeError:
+            response = {"msg": "Token is invalid", "status": "INVALID"}
+            app_logger.warning(f"🔴 Token Test Failed: {response}")
+            return jsonify(response), 401
+
+        except Exception as e:
+            response = {"msg": f"Token validation failed: {str(e)}", "status": "ERROR"}
+            app_logger.error(f"🚨 Token Test Unexpected Error: {response}")
+            return jsonify(response), 401
+
+    except Exception as e:
+        app_logger.error(f"🚨 Error testing token: {str(e)}")
+        return jsonify({"error": "Internal Server Error"}), 500
+        
 @app.route('/login', methods=['POST'])
+@limiter.limit("60 per minute; 3600 per hour; 86400 per day")
 @cross_origin()
 def login():
-    app_logger.info(f"Incoming request method: {request.method}")
+    """Handles user login with rate limiting and proper logging."""
+    
+    # 🛑 Log incoming request method
+    app_logger.info(f"🔹 Incoming request method: {request.method}")
+
     if request.method != 'POST':
-        app_logger.info(f"Method not allowed: {request.method}")
+        app_logger.warning(f"❌ Method not allowed: {request.method}")
         return jsonify({"error": "Method not allowed"}), 405
-    app_logger.info(f"login: JWT_SECRET_KEY set: {app.config['JWT_SECRET_KEY']}")
-    return login_function(app.config['JWT_SECRET_KEY'], app.config['JWT_ACCESS_TOKEN_EXPIRES'], app.config['JWT_REFRESH_TOKEN_EXPIRES'])
+
+    try:
+        # ✅ Get the client's IP address
+        client_ip = request.remote_addr
+
+        # ✅ Fetch actual remaining login attempts (not just TTL) from Redis
+        redis_client = get_redis_client()
+        limit_keys = {
+            "minute": f"LIMITS:LIMITER/{client_ip}/login/60/1/minute",
+            "hour": f"LIMITS:LIMITER/{client_ip}/login/3600/1/hour",
+            "day": f"LIMITS:LIMITER/{client_ip}/login/86400/1/day",
+        }
+
+        remaining_attempts = {}
+        for key, redis_key in limit_keys.items():
+            if redis_client.exists(redis_key):
+                # Redis stores counters for rate limiting, so we can calculate remaining attempts
+                current_count = int(redis_client.get(redis_key) or 0)
+                max_limit = {"minute": 60, "hour": 3600, "day": 86400}[key]  # Based on defined limits
+                remaining_attempts[key] = max(0, max_limit - current_count)
+            else:
+                remaining_attempts[key] = "Unlimited or expired"
+
+        # 🕒 Log correct remaining attempts
+        app_logger.info(f"🕒 Remaining login attempts for {client_ip}: {remaining_attempts}")
+
+        # ✅ Proceed with Login Function
+        return login_function(
+            app.config['JWT_SECRET_KEY'],
+            app.config['JWT_ACCESS_TOKEN_EXPIRES'],
+            app.config['JWT_REFRESH_TOKEN_EXPIRES']
+        )
+
+    except RateLimitExceeded as e:
+        retry_after = e.description.get("retry_after", "Unknown")
+        app_logger.warning(f"⚠️ Rate limit exceeded! Retry after {retry_after} seconds.")
+        return jsonify({"error": "Rate limit exceeded", "retry_after": retry_after}), 429
+
+    except Exception as e:
+        app_logger.error(f"🚨 Unexpected login error: {str(e)}", exc_info=True)
+        return jsonify({"error": "Internal Server Error"}), 500
 
 @app.route('/create-checkout-session', methods=['POST'])
 @cross_origin()
@@ -3420,40 +3790,43 @@ def handle_expired_error(e):
         # 2) Extract jti, username, expires_at from decoded token
         jti = decoded_token.get('jti')
         expires_dt = datetime.utcfromtimestamp(decoded_token['exp'])
-        username = decoded_token.get('sub')  # or "username"
-        
+        username = decoded_token.get('username')
+
         if not jti or not username:
-            return jsonify({"msg": "Token information not found"}), 401
-        
+            return jsonify({"msg": "Token has expired"}), 401
+
         # 3) Connect to Redis
         redis_client = get_redis_client()
-        
-        # 4) Find the matching JSON in "issued_tokens"
-        all_tokens = redis_client.smembers("issued_tokens")
+
+        # 🚀 **Use per-user issued tokens**
+        issued_tokens_key = f"issued_tokens:{username}"
+        revoked_tokens_key = f"revoked_tokens:{username}"
+
+        # 4) Find the matching JSON in the per-user "issued_tokens"
+        all_tokens = redis_client.smembers(issued_tokens_key)
         token_json_to_revoke = None
-        
+
         for t_bytes in all_tokens:
             t_str = t_bytes.decode('utf-8')
             t_data = json.loads(t_str)
             if t_data.get("jti") == jti:
                 token_json_to_revoke = t_str
                 break
-        
-        if token_json_to_revoke:
-            # 5a) Remove from the "issued_tokens" set
-            redis_client.srem("issued_tokens", token_json_to_revoke)
 
-            # 5b) Add it to the "revoked_tokens" set
-            add_revoked_token_function(
-                jti=jti,
-                username=username,
-                jwt=token_str,  # or t_data['jwt']
-                expires_at=expires_dt,
-                redis_client=redis_client
-            )
+        if token_json_to_revoke:
+            # 5a) Remove from per-user "issued_tokens" set
+            redis_client.srem(issued_tokens_key, token_json_to_revoke)
+
+            # 5b) Add to per-user "revoked_tokens" set
+            redis_client.sadd(revoked_tokens_key, json.dumps({
+                "jti": jti,
+                "username": username,
+                "jwt": token_str,  # or t_data['jwt']
+                "expires_at": expires_dt.isoformat()
+            }))
 
             app_logger.info(f"Removed expired token: {jti} for user {username}")
-            return jsonify({"msg": "Token has expired and has been logged out"}), 401
+            return jsonify({"msg": "Token 2 has expired and has been logged out"}), 401
         else:
             # If we don't find the JSON in "issued_tokens", it's either already revoked or never existed
             return jsonify({"msg": "Token not found in issued tokens"}), 401
@@ -3464,6 +3837,7 @@ def handle_expired_error(e):
     except Exception as exc:
         app_logger.info(f"Error handling expired token: {str(exc)}")
         return jsonify({"error": "Internal Server Error"}), 500
+
 
 @app.route('/logout', methods=['POST'])
 @cross_origin()
@@ -3480,22 +3854,23 @@ def dashboard():
         return render_template('client.html')
     return 'Unauthorized', 403
 
-@app.route('/test-throughput', methods=['POST'])
-@jwt_required()
-def test_throughput():
-    return test_throughput_function()
-
 @limiter.request_filter
-def get_user_limits():
-    return "5 per minute; 10 per day; 100 per month"  # Default rate limits
+def exempt_admin():
+    try:
+        verify_jwt_in_request()  # Ensures a JWT is present
+        return get_jwt_identity() == "admin"
+    except Exception:
+        return False  # If no JWT is present, return False
 
 @app.route('/refresh', methods=['POST'])
-@jwt_required(refresh=True)
-@limiter.limit("5 per minute; 10 per day; 100 per month")
+@jwt_required(refresh=True)  # Ensures the route expects a refresh token
+@limiter.limit("2 per minute; 1000 per day; 30000 per month")
 def refresh():
-    app_logger.info("/refresh")
+    app_logger.info("/refresh called")
     try:
+        # Extract the user information from the refresh token
         current_user = get_jwt_identity()
+        app_logger.info(f"Current user from refresh token: {current_user}")
 
         # Connect to Redis
         redis_client = Redis(
@@ -3505,15 +3880,19 @@ def refresh():
             db=app.config['REDIS_DB']
         )
 
-        # Retrieve the user's role, credits, and limits from Redis
+        # Retrieve the user's data from Redis (e.g., role, credits, limits)
         user_data = redis_client.hgetall(f"{current_user}")
         if not user_data:
+            app_logger.warning(f"User {current_user} does not exist in Redis.")
             return jsonify({"msg": "User does not exist"}), 404
 
-        role = user_data.get('role', b'client').decode('utf-8')  # Default to 'client'
+        role = user_data.get('role', b'client').decode('utf-8')  # Default to 'client' if not found
         credits = int(user_data.get('credits', 0))
 
-        # Retrieve the user's limits from Redis (assuming limits are stored under a key like "username:limits")
+        # Log the retrieved user data
+        app_logger.debug(f"User data: {user_data}, Role: {role}, Credits: {credits}")
+
+        # Retrieve the user's limits (e.g., daily, hourly, minute limits) from Redis
         limits_data = redis_client.hgetall(f"{current_user}:limits")
         if limits_data:
             daily_limit = int(limits_data.get('daily_limit', DEFAULT_DAILY_LIMIT))
@@ -3524,32 +3903,49 @@ def refresh():
             hourly_limit = DEFAULT_HOURLY_LIMIT
             minute_limit = DEFAULT_MINUTE_LIMIT
 
+        # Log the limits
+        app_logger.debug(f"User limits: daily: {daily_limit}, hourly: {hourly_limit}, minute: {minute_limit}")
+
         # Revoke any existing access tokens before creating new ones
         revoke_all_access_tokens_for_user(current_user, app.config['JWT_SECRET_KEY'], redis_client)
 
         # Generate new tokens
-        access_token, refresh_token = create_tokens(current_user, role, daily_limit, hourly_limit, minute_limit,
-                                                     str(app.config['JWT_SECRET_KEY']), app.config['JWT_ACCESS_TOKEN_EXPIRES'],
-                                                     app.config['JWT_REFRESH_TOKEN_EXPIRES'], check_existing_refresh=True)
+        access_token, refresh_token = create_tokens(
+            current_user, role, daily_limit, hourly_limit, minute_limit,
+            str(app.config['JWT_SECRET_KEY']),
+            app.config['JWT_ACCESS_TOKEN_EXPIRES'],
+            app.config['JWT_REFRESH_TOKEN_EXPIRES'],
+            check_existing_refresh=True
+        )
+
+        app_logger.info(f"New tokens generated for user {current_user}: access_token: {access_token[:10]}...")  # Log part of the token for security
 
         # Cleanup expired tokens
         issued_tokens_key = f"issued_tokens:{current_user}"
         expired_tokens = redis_client.smembers(issued_tokens_key)
-        expired_tokens = [json.loads(token.decode('utf-8')) for token in expired_tokens if token_is_expired(token)]
+        expired_tokens = [
+            json.loads(token.decode('utf-8')) for token in expired_tokens if token_is_expired(token)
+        ]
 
         # Revoke expired tokens
         for token_data in expired_tokens:
+            app_logger.info(f"Revoking expired token: {token_data['jti']}")
             add_revoked_token_function(token_data['jti'], token_data['username'], "", token_data['expires_at'], redis_client)
             redis_client.srem('issued_tokens', token_data['jti'])  # Remove expired token from issued set
 
+        app_logger.info(f"Expired tokens revoked for user {current_user}.")
+
         return jsonify(access_token=access_token), 200
+
     except RateLimitExceeded as e:
-        app_logger.info(f"Rate limit exceeded: {str(e)}")
+        app_logger.warning(f"Rate limit exceeded: {str(e)}")
         return jsonify({"error": "Rate limit exceeded", "retry_after": e.description["retry_after"]}), 429
+
     except Exception as e:
-        app_logger.info(f"Error during token refresh: {str(e)}")
-        app_logger.info(traceback.format_exc())
+        app_logger.error(f"Error during token refresh for user {current_user}: {str(e)}")
+        app_logger.error(traceback.format_exc())  # Log the stack trace for debugging
         return jsonify({"error": "Internal Server Error"}), 500
+
         
 @app.route('/revoke', methods=['POST'])
 @jwt_required()
@@ -3623,7 +4019,7 @@ def app_route():
             return render_template('instructions.html')
         else:
             app_logger.info("Invalid API key entered")
-            return jsonify({"error": "Unauthorized"}), 401
+            return jsonify({"msg": "Unauthorized"}), 401
 
 def validate_and_process():
     try:
@@ -3646,7 +4042,7 @@ def validate_and_process():
 
     except ExpiredSignatureError as e:
         app_logger.info(f"Token has expired: {str(e)}")
-        return jsonify({"error": "Token has expired"}), 401  # Correct status code
+        return jsonify({"msg": "Token has expired"}), 401  # Correct status code
 
     except RateLimitExceeded as e:
         retry_after = e.description['retry_after'] if 'retry_after' in e.description else 60  # Default to 60 seconds if not specified
@@ -3670,7 +4066,7 @@ def ratelimit_error(e):
 
 @app.errorhandler(401)
 def unauthorized(error):
-    return jsonify({"error": "Unauthorized"}), 401
+    return jsonify({"msg": "Unauthorized"}), 401
 
 @app.errorhandler(400)
 def bad_request(error):
@@ -3686,12 +4082,12 @@ def handle_exception(e):
     app_logger.info(traceback.format_exc())
     return jsonify({"error": "Internal Server Error"}), 500
 
-# Disable SSLify for local development
-if os.getenv('FLASK_ENV') == 'production':
-    sslify = SSLify(app)
-    app_logger.info("Created SSLify")
+# Disable Talisman for local development
+if os.getenv("FLASK_ENV") == "production":
+    Talisman(app)
+    app_logger.info("Enabled HTTPS security headers with Flask-Talisman")
 else:
-    app_logger.info("SSLify not enabled for local development")
+    app_logger.info("Talisman not enabled for local development")    
 
 @app.after_request
 def add_security_headers(response):

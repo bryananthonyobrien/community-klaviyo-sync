@@ -157,7 +157,7 @@ export async function initializePage() {
 }
 
 // Helper function for handling checkout logic
-async function handleCheckout() {
+async function handleCheckout_old() {
     const creditsInput = document.getElementById("credits-input");
     const credits = parseInt(creditsInput.value);
 
@@ -188,6 +188,52 @@ async function handleCheckout() {
         console.error("Error during checkout:", error);
     }
 }
+
+async function handleCheckout() {
+    const creditsInput = document.getElementById("credits-input");
+    const credits = parseInt(creditsInput.value);
+
+    // Check if the credits input is valid
+    if (isNaN(credits) || credits < 1000) {
+        alert("Minimum number of credits is 1000");
+        return;
+    }
+
+    const payload = { credits };
+
+    try {
+        // Request with token refresh handling
+        const response = await makeRequestWithTokenRefresh(async (token) => {
+            return fetch(`${API_URL}/create-checkout-session`, {
+                method: "POST",
+                headers: createAuthorizedHeaders(token),
+                body: JSON.stringify(payload),
+            });
+        });
+
+        // Check if response is OK
+        if (response.ok) {
+            const session = await response.json();
+            if (stripe) {
+                // Redirect to Stripe checkout with the session ID
+                await stripe.redirectToCheckout({ sessionId: session.id });
+                console.log("Checkout completed successfully.");
+            } else {
+                alert("Stripe is not initialized properly.");
+            }
+        } else {
+            // Log and alert in case of an error response
+            const errorResponse = await response.json();
+            console.error("Error response:", errorResponse);
+            alert(`Checkout process failed. Error: ${errorResponse.error || "Please try again."}`);
+        }
+    } catch (error) {
+        // Catch any other errors
+        console.error("Error during checkout:", error);
+        alert("An error occurred during the checkout process. Please try again.");
+    }
+}
+
 
 // Function to load configuration from the server and populate fields
 export async function loadConfiguration() {

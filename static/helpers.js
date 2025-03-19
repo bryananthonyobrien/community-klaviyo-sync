@@ -125,7 +125,6 @@ export function logError(context, error) {
     }
 }
 
-// Token refresh function with retry logic
 export async function makeRequestWithTokenRefresh(requestFn, retryOnUnauthorized = true, maxRetries = 3) {
     let accessToken = localStorage.getItem('access_token');
     const refreshToken = localStorage.getItem('refresh_token');
@@ -143,16 +142,16 @@ export async function makeRequestWithTokenRefresh(requestFn, retryOnUnauthorized
     }
 
     try {
-        const response = await requestFn(accessToken);
+        let response = await requestFn(accessToken);  // Call with current access token
 
-        // If unauthorized and we haven't retried yet, refresh the token and retry the request
-        if (response.status === 401 && retryOnUnauthorized && retryCount < maxRetries) {
+        // Retry logic for unauthorized errors (401)
+        while (response.status === 401 && retryOnUnauthorized && retryCount < maxRetries) {
             console.log('Access token expired, refreshing token and retrying request...');
             accessToken = await refreshAccessToken();
 
             if (accessToken) {
                 retryCount++; // Increment the retry count
-                return await makeRequestWithTokenRefresh(requestFn, false, maxRetries); // Retry the request
+                response = await requestFn(accessToken);  // Retry the request with the new access token
             } else {
                 alert('Failed to refresh access token. Please login again.');
                 window.location.href = '/login'; // Redirect to login if refresh fails
@@ -168,10 +167,20 @@ export async function makeRequestWithTokenRefresh(requestFn, retryOnUnauthorized
             return null;
         }
 
+        // If response is still not ok after retrying, show an error alert
+        if (!response.ok) {
+            const errorResponse = await response.json();
+            console.error("Error response from server:", errorResponse);
+            alert(`Request failed. Error: ${errorResponse.error || "Unknown error."}`);
+            return null;
+        }
+
         return response;
     } catch (error) {
         console.error('Error making request:', error);
-        alert('An error occurred while making the request.');
+        alert('An error occurred while making the request. Please try again.');
         return null;
     }
 }
+
+

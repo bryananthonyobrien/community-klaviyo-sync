@@ -50,45 +50,59 @@ def initialize_user_cache(username, password, role='client', login_attempts=0, l
             revoked_tokens = redis_client.smembers(revoked_tokens_key)
             current_time = datetime.utcnow()
             valid_tokens = set()
+            removed_empty = 0
+            removed_expired = 0
 
-            for jti in revoked_tokens:
-                try:
-                    token_data = json.loads(jti.decode('utf-8'))  # Convert from bytes & parse JSON
-                    expires_at = token_data.get('expires_at')
-
-                    # If there's no expiration, assume it's a permanent token (skip it)
-                    if not expires_at:
-                        valid_tokens.add(jti)
-                        continue
-
-                    expiry_time = datetime.fromisoformat(expires_at)
-                    
-                    if expiry_time > current_time:
-                        valid_tokens.add(jti)  # Keep valid tokens
-                    else:
-                        app_logger.info(f"🗑️ Removing expired revoked token {jti} for user {username} (expired at {expires_at})")
-
-                except (json.JSONDecodeError, ValueError) as e:
-                    app_logger.warning(f"⚠️ Error decoding revoked token for {username}, skipping: {str(e)}")
-
-            # Replace revoked tokens with only the valid ones
-            redis_client.delete(revoked_tokens_key)
-            if valid_tokens:
-                redis_client.sadd(revoked_tokens_key, *valid_tokens)
-                app_logger.info(f"✅ Cleaned revoked tokens for {username}. Preserved {len(valid_tokens)} valid tokens.")
+            if not revoked_tokens:
+                app_logger.info(f"No expired revoked tokens to clean for {username}.")
             else:
-                app_logger.info(f"✅ Cleaned all expired revoked tokens for {username}.")
+                for jti in revoked_tokens:
+                    jti_decoded = jti.decode('utf-8').strip()
+                    if not jti_decoded:
+                        app_logger.info(f"🗑️ Removing empty entry in revoked tokens for {username}.")
+                        redis_client.srem(revoked_tokens_key, jti)
+                        removed_empty += 1
+                        continue  # Skip empty entries
+                    try:
+                        token_data = json.loads(jti_decoded)  # Parse JSON
+                        expires_at = token_data.get('expires_at')
+                        token_type = token_data.get('type', 'unknown')
+
+                        # If there's no expiration, assume it's a permanent token (skip it)
+                        if not expires_at:
+                            valid_tokens.add(jti)
+                            continue
+
+                        expiry_time = datetime.fromisoformat(expires_at)
+
+                        if expiry_time > current_time:
+                            valid_tokens.add(jti)  # Keep valid tokens
+                        else:
+                            app_logger.info(f"🗑️ Removing expired revoked {token_type} token {jti} for user {username} (expired at {expires_at})")
+                            redis_client.srem(revoked_tokens_key, jti)
+                            removed_expired += 1
+
+                    except (json.JSONDecodeError, ValueError) as e:
+                        app_logger.info(f"⚠️ Error decoding revoked token for {username}, skipping: {str(e)}")
+
+                # Replace revoked tokens with only the valid ones
+                redis_client.delete(revoked_tokens_key)
+                if valid_tokens:
+                    redis_client.sadd(revoked_tokens_key, *valid_tokens)
+                    app_logger.info(f"Cleaned revoked tokens for {username}. Preserved {len(valid_tokens)} valid tokens.")
+                else:
+                    app_logger.info(f"Cleaned all expired revoked tokens for {username}.")
+
+                app_logger.info(f"Summary for {username}: Removed {removed_empty} empty entries, {removed_expired} expired tokens.")
 
         else:
-            redis_client.sadd(revoked_tokens_key, '')  # Initialize if it doesn't exist
-            app_logger.info(f"Created per-user Redis set for {revoked_tokens_key}.")
+            app_logger.info(f"Redis set for {revoked_tokens_key} does not exist.")
 
-        # ✅ Preserve issued tokens (Do NOT delete)
+        # Preserve issued tokens (Do NOT delete)
         if not redis_client.exists(issued_tokens_key):
-            redis_client.sadd(issued_tokens_key, '')  # Initialize with an empty value
-            app_logger.info(f"Created per-user Redis set for {issued_tokens_key}.")
+            app_logger.info(f"No issued tokens for {username}.")
         else:
-            app_logger.info(f"⚠️ Found issued tokens for {username}.")
+            app_logger.info(f"Found issued tokens for {username}.")
 
         # Prepare the user data dictionary with all necessary attributes
         user_data = {
@@ -103,7 +117,7 @@ def initialize_user_cache(username, password, role='client', login_attempts=0, l
         }
 
         # Store all this data in Redis using hset (for hash values)
-        redis_client.hset(username, mapping=user_data)  # Store user data in Redis
+        redis_client.hset(f"user:{username}", mapping=user_data)
 
         # Store the user's limits in Redis hash
         limits = {
@@ -111,7 +125,7 @@ def initialize_user_cache(username, password, role='client', login_attempts=0, l
             "hourly_limit": hourly_limit,
             "minute_limit": minute_limit
         }
-        redis_client.hmset(f"{username}:limits", limits)
+        redis_client.hset(f"{username}:limits", mapping=limits)
 
         # Initialize the user's credit_changes as an empty list (if no changes yet)
         redis_client.delete(f"{username}:credit_changes")  # Clean up if it exists already
@@ -132,14 +146,17 @@ def initialize_user_cache(username, password, role='client', login_attempts=0, l
         app_logger.info(f"Initial credits set for user {username}.")
 
     except Exception as e:
-        app_logger.error(f"❌ Error initializing cache for user {username}: {str(e)}")
+        app_logger.info(f"❌ Error initializing cache for user {username}: {str(e)}")
+
      
 def suspend_user_cache(username):
     try:
         redis_client = get_redis_client()
+        redis_key = f"user:{username}"  # Add prefix
+
         # Update the cache to reflect that the user is suspended
-        if redis_client.exists(username):
-            redis_client.hmset(username, {'user_status': 'suspended'})  # Changed status to user_status
+        if redis_client.exists(redis_key):
+            redis_client.hset(redis_key, mapping={'user_status': 'suspended'})  # Change status to suspended
             app_logger.info(f"Cache updated for suspended user: {username}")
         else:
             app_logger.info(f"User {username} not found in cache when trying to suspend.")
@@ -149,9 +166,11 @@ def suspend_user_cache(username):
 def unsuspend_user_cache(username):
     try:
         redis_client = get_redis_client()
+        redis_key = f"user:{username}"  # Add prefix
+
         # Update the cache to reflect that the user is active
-        if redis_client.exists(username):
-            redis_client.hmset(username, {'user_status': 'active'})  # Changed status to user_status
+        if redis_client.exists(redis_key):
+            redis_client.hset(redis_key, mapping={'user_status': 'active'})  # Change status to active
             app_logger.info(f"Cache updated for unsuspended user: {username}")
         else:
             app_logger.info(f"User {username} not found in cache when trying to unsuspend.")
@@ -488,30 +507,6 @@ def clean_phone_number(phone):
     # app_logger.info(f"clean_phone_number {phone} --> {cleaned_phone}")
 
     return cleaned_phone
-
-def drop_old_redis_keys(pattern):
-    """
-    Drops all Redis keys that match the given pattern.
-    """
-    try:
-        redis_client = get_redis_client()
-
-        # Fetch all keys matching the pattern
-        matching_keys = redis_client.keys(pattern)
-
-        if not matching_keys:
-            app_logger.info(f"No matching keys found for pattern: {pattern}")
-            return
-
-        # Delete all matching keys
-        for key in matching_keys:
-            redis_client.delete(key)
-            app_logger.info(f"Deleted key: {key.decode('utf-8')}")
-
-    except redis.exceptions.ConnectionError as e:
-        priapp_logger.infont(f"Redis connection error: {str(e)}")
-    except Exception as e:
-        app_logger.info(f"Error dropping keys: {str(e)}")
 
 def create_stage_csv_files(username, silent=False):
     """

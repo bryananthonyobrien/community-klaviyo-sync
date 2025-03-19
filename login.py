@@ -10,37 +10,37 @@ from cache import get_user_data, get_redis_client
 import redis
 import json
 
-
 def user_exists(username):
     try:
         redis_client = get_redis_client()
+        user_key = f"user:{username}"  # ✅ Use prefixed key
+
         # Check if the user hash exists by checking the user's hash key
-        if redis_client.exists(username):
-            return True
-        else:
-            return False
+        return redis_client.exists(user_key) > 0  # ✅ Updated key usage
+
     except redis.RedisError as e:
         logging.error(f"Redis error during user existence check: {e}")
         return False
 
 def login_function(secret, access_expires, refresh_expires):
-    app_logger.debug("/login")
+    app_logger.info("/login")
     try:
         if not request.is_json:
-            app_logger.error("Missing JSON in request")
+            app_logger.info("Missing JSON in request")
             return jsonify({"msg": "Missing JSON in request"}), 400
 
         username = request.json.get('username', None)
 
         if not username:
-            app_logger.error("Username is missing in request")
+            app_logger.info("Username is missing in request")
             return jsonify({"msg": "Username is missing in request"}), 400
 
         # Fetch user data from Redis
         redis_client = get_redis_client()
-        user_data_key = username
+        user_data_key = f"user:{username}"  # ✅ Use prefixed key
+
         if not redis_client.exists(user_data_key):
-            app_logger.error(f"User {username} does not exist")
+            app_logger.info(f"User {username} does not exist")
             return jsonify({"msg": "User does not exist"}), 404
 
         # Fetch user data from Redis hash
@@ -49,7 +49,7 @@ def login_function(secret, access_expires, refresh_expires):
         decoded_user_data = {k.decode(): v.decode() for k, v in user_data.items()}
 
         # Pretty-print the decoded JSON
-        app_logger.debug(f"Fetched user data for {username}: \n{json.dumps(decoded_user_data, indent=4, sort_keys=True)}")
+        app_logger.info(f"Fetched username {username} from Redis: \n{json.dumps(decoded_user_data, indent=4, sort_keys=True)}")
 
         # Decode all byte string values to proper types
         user_data = decode_redis_values(user_data)
@@ -61,8 +61,6 @@ def login_function(secret, access_expires, refresh_expires):
         is_logged_in_now = int(user_data.get('is_logged_in_now', 0))
         role = user_data.get('role', 'client')
         credits = int(user_data.get('credits', 10))
-
-        app_logger.debug(f"User {username} has role: {role}")
 
         if user_status == 'suspended':
             return jsonify({"msg": "User account is suspended"}), 403
@@ -78,15 +76,14 @@ def login_function(secret, access_expires, refresh_expires):
         password = request.json.get('password', None)
 
         if not password:
-            app_logger.error("Password is missing in request")
+            app_logger.info("Password is missing in request")
             return jsonify({"msg": "Password is missing in request"}), 422
 
         # Fetch the hashed password from Redis
         hashed_password = user_data.get('password', None)
-        app_logger.debug(f"Fetched password: {hashed_password} (Type: {type(hashed_password)})")
 
         if hashed_password is None:
-            app_logger.error(f"Password for user {username} is not set in Redis.")
+            app_logger.info(f"Password for user {username} is not set in Redis.")
             return jsonify({"msg": "Password not set for user"}), 500
 
         # Check password hash
@@ -94,10 +91,8 @@ def login_function(secret, access_expires, refresh_expires):
             # Increment login attempts and set the last login attempt time
             redis_client.hincrby(user_data_key, 'login_attempts', 1)
             redis_client.hset(user_data_key, 'last_login_attempt', datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'))
-            app_logger.debug(f"Incorrect password for user {username}")
+            app_logger.info(f"Incorrect password for user {username}")
             return jsonify({"msg": "Bad username or password"}), 401
-
-        app_logger.debug(f"Login of {username} looks good")
 
         # Reset login attempts and mark the user as logged in
         redis_client.hset(user_data_key, 'login_attempts', 0)
@@ -105,7 +100,7 @@ def login_function(secret, access_expires, refresh_expires):
         redis_client.hset(user_data_key, 'last_login_attempt', datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'))
 
         # Fetch user limits from Redis or set defaults
-        user_limits_key = f"{username}:limits"
+        user_limits_key = f"user:{username}:limits"  # ✅ Updated limits key
         if redis_client.exists(user_limits_key):
             daily_limit = int(redis_client.hget(user_limits_key, 'daily_limit'))
             hourly_limit = int(redis_client.hget(user_limits_key, 'hourly_limit'))
@@ -135,12 +130,13 @@ def login_function(secret, access_expires, refresh_expires):
         }
 
         # Log the response data in a pretty format
-        app_logger.debug(f"Login success for user {username}:\n{json.dumps(response_data, indent=4)}")        return jsonify(response_data), 200
+        app_logger.info(f"Login success for user {username}:\n{json.dumps(response_data, indent=4)}")        
+        return jsonify(response_data), 200
 
     except redis.RedisError as e:
-        app_logger.error(f"Redis error during login: {str(e)}")
+        app_logger.info(f"Redis error during login: {str(e)}")
         return jsonify({"error": "Redis error. Please try again later."}), 500
     except Exception as e:
-        app_logger.error(f"Error during login: {str(e)}")
-        app_logger.error(traceback.format_exc())
+        app_logger.info(f"Error during login: {str(e)}")
+        app_logger.info(traceback.format_exc())
         return jsonify({"error": "Internal Server Error"}), 500
