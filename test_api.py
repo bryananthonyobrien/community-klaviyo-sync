@@ -439,9 +439,10 @@ def test_revoked_token_count_logging(redis_client):
 # ✅ 17. Test: Continuous Token Validation for 2 Minutes with 10-second Intervals (Handles Token Expiration)
 def test_continuous_token_validation(redis_client):
     logger.info("Test 17: Continuous token validation with login retry loop")
+    refresh_failed = False
 
     # ✅ Outer Loop: Login Retry with User Prompt
-    while True:
+    while not refresh_failed:
         # Step 1: Attempt login
         login_response = requests.post(
             LOGIN_URL,
@@ -472,7 +473,7 @@ def test_continuous_token_validation(redis_client):
                     logger.error(f"🚨 Error during token validation at {time.ctime()} - Status: 401, Message: {response.json()}")
                     
                     # Step 3: Token expired, call /refresh to get a new token
-                    logger.info("❌ Token expired. Calling /refresh to get a new token...")
+                    logger.info(f"❌ Token expired. Calling /refresh to get a new token ... [refresh token : {refresh_token}]")
                     refresh_response = requests.post(
                         f"{BASE_URL}/refresh", 
                         headers={"Authorization": f"Bearer {refresh_token}"}
@@ -489,7 +490,8 @@ def test_continuous_token_validation(redis_client):
                         # Update headers with the new access token
                         headers = {"Authorization": f"Bearer {access_token}"}
                     else:
-                        logger.error("🚨 Refresh failed. Exiting the test.")
+                        logger.error(f"🚨 Refresh failed. Exiting the test. [response : {refresh_response.json()}]")
+                        refresh_failed = True
                         break  # Exit the loop if refresh fails
 
                 else:

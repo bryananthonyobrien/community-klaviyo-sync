@@ -322,10 +322,15 @@ def get_dynamic_rate_limit():
     
 @jwt.invalid_token_loader
 def invalid_token_callback(reason):
-    if request.endpoint == "login":
-        return
-    app_logger.error(f"Invalid Token: {reason}")  # Add detailed logging
-    return jsonify({"msg": "Invalid token", "status": "INVALID"}), 401
+    if "expired" in reason:
+        app_logger.warning(f"Token expired: {reason}")
+        return jsonify({"msg": "Token has expired", "status": "INVALID"}), 401
+    elif "signature" in reason:
+        app_logger.error(f"Invalid signature: {reason}")
+        return jsonify({"msg": "Invalid token signature", "status": "INVALID"}), 401
+    else:
+        app_logger.error(f"[invalid_token_callback] Invalid token: {reason}")
+        return jsonify({"msg": "Invalid token", "status": "INVALID"}), 401
 
 @jwt.expired_token_loader
 def expired_token_callback(jwt_header, jwt_data):
@@ -383,32 +388,39 @@ def check_if_token_revoked(jwt_header, jwt_payload):
     """
     Checks if a given JWT is in the revoked tokens list.
     """
+    app_logger.info("Check if a given JWT is in the revoked tokens list.")
     jti = jwt_payload.get("jti")
     username = jwt_payload.get("sub")  # Use "sub" as it's the standard claim for identity
 
     if not jti or not username:
-        app_logger.error(f"⚠️ JWT missing required claims")
+        app_logger.info(f"⚠️ JWT missing required claims: JTI or username")
         return True  # Reject token since it’s missing required claims
 
-    # 🔍 Debugging: Log the JWT contents
+    # Debugging: Log the JWT contents
     debug_jwt_payload(jwt_header, jwt_payload, app_logger)
 
     redis_client = get_redis_client()
     revoked_tokens_key = f"revoked_tokens:{username}"  # Per-user revoked tokens key
 
-    # Get all revoked tokens for the user
-    revoked_tokens = redis_client.smembers(revoked_tokens_key)
+    try:
+        # Get all revoked tokens for the user
+        revoked_tokens = redis_client.smembers(revoked_tokens_key)
 
-    for token_data in revoked_tokens:
-        try:
-            token_dict = json.loads(token_data.decode("utf-8"))  # Decode from Redis
-            if token_dict.get("jti") == jti:
-                app_logger.info(f"🚫 Token {jti} for user {username} is revoked.")
-                return True  # Reject request
-        except json.JSONDecodeError as e:
-            app_logger.error(f"⚠️ Error decoding revoked token: {e}")
+        for token_data in revoked_tokens:
+            try:
+                token_dict = json.loads(token_data.decode("utf-8"))  # Decode from Redis
+                if token_dict.get("jti") == jti:
+                    app_logger.info(f"🚫 Token {jti} for user {username} is revoked.")
+                    return True  # Reject request
+            except json.JSONDecodeError as e:
+                app_logger.info(f"⚠️ Error decoding revoked token: {e}")
 
-    return False  # Token is still valid
+        app_logger.info(f"Token {jti} for user {username} is not revoked.")  # Info level is good here
+        return False  # Token is still valid
+    except Exception as e:
+        app_logger.info(f"⚠️ Error checking revoked tokens for {username}: {str(e)}")
+        return True  # Reject the token if we fail to check the revoked tokens
+
     
 def login_required(f):
     @wraps(f)
@@ -427,6 +439,25 @@ from cache import get_redis_client
 @app.before_request
 def log_request_start():
     """Logs requests, skipping JWT extraction for specific routes where it's never present."""
+    # Log the request headers in a pretty format
+    app_logger.info("Request Headers:")
+    for key, value in request.headers.items():
+        app_logger.info(f"  {key}: {value}")
+    
+    # Log the raw request body (this will help in case it's not JSON)
+    try:
+        raw_data = request.get_data(as_text=True)  # Capture the raw body as text
+        app_logger.info("Raw Request Body:")
+        app_logger.info(raw_data)  # Log the raw body
+
+        # Try parsing the body as JSON
+        request_data = request.get_json()
+        app_logger.info("Request Body (JSON):")
+        app_logger.info(json.dumps(request_data, indent=2))  # Pretty print JSON body
+
+    except Exception as e:
+        app_logger.warning(f"Could not parse request body as JSON: {e}")  
+              
     try:
         redis_client = get_redis_client()
         request_path = request.path
@@ -463,6 +494,7 @@ def log_request_start():
 def log_request_end(response):
     """Logs request completion and credit state, even for static files."""
     request_path = request.path
+
     username = getattr(g, 'username', None)
 
     if username:
@@ -3862,9 +3894,10 @@ def exempt_admin():
     except Exception:
         return False  # If no JWT is present, return False
 
+
 @app.route('/refresh', methods=['POST'])
 @jwt_required(refresh=True)  # Ensures the route expects a refresh token
-@limiter.limit("2 per minute; 1000 per day; 30000 per month")
+@limiter.limit("5 per minute; 1000 per day; 30000 per month")
 def refresh():
     app_logger.info("/refresh called")
     try:
@@ -3945,8 +3978,7 @@ def refresh():
         app_logger.error(f"Error during token refresh for user {current_user}: {str(e)}")
         app_logger.error(traceback.format_exc())  # Log the stack trace for debugging
         return jsonify({"error": "Internal Server Error"}), 500
-
-        
+      
 @app.route('/revoke', methods=['POST'])
 @jwt_required()
 def revoke():

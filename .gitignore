@@ -15,3 +15,11 @@ build_docker_image.sh
 reset_docker.sh
 run_container.sh
 shell.sh
+api_tests/login.py
+api_tests/test_token.py
+decode.py
+test.sh
+test_auth.py
+test_user_management.py
+x.sh
+

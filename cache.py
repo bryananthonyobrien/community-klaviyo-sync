@@ -29,13 +29,26 @@ cache_config = {
     'CACHE_REDIS_DB': os.getenv('REDIS_DB', 0)
 }
 
+# Global variable to keep track of the Redis client
+redis_client_instance = None
+
 def get_redis_client():
-    return Redis(
+    global redis_client_instance
+
+    # Check if the Redis client already exists
+    if redis_client_instance:
+        app_logger.info("Using existing Redis client.")
+        return redis_client_instance
+
+    # If no existing client, create a new one
+    redis_client_instance = Redis(
         host=os.getenv('REDIS_HOST', 'localhost'),
         port=int(os.getenv('REDIS_PORT', 6379)),
         password=os.getenv('REDIS_PASSWORD', None),
         db=int(os.getenv('REDIS_DB', 0))
     )
+    app_logger.info("Created a new Redis client.")
+    return redis_client_instance
 
 def initialize_user_cache(username, password, role='client', login_attempts=0, last_login_attempt='None', credits=10, user_status='active', is_logged_in_now=0, created='None', daily_limit=200, hourly_limit=50, minute_limit=10):
     try:
